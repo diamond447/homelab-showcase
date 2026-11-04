@@ -1,0 +1,85 @@
+---
+homepage_dir: /opt/apps/homepage
+homepage_python_version: "3.13"
+
+# The image runs as root only to drop to this UID/GID; config files are owned
+# by it so the entrypoint never has to chown them.
+homepage_uid: 1000
+homepage_gid: 1000
+
+# Slug of the public Uptime Kuma status page. Empty: ask Kuma which page it
+# serves at https://{{ uptime_kuma_domain }}/ (domain mapping or entry page).
+homepage_uptime_kuma_slug: ""
+
+# Read-only Proxmox API token for the admin dashboard (secret in vault_homepage_proxmox_token).
+homepage_proxmox_user: "homepage@pve"
+homepage_proxmox_token_name: "homepage"
+
+# Proxmox API token that may only start and hibernate the agent VM
+# (secret in vault_homepage_agent_power_token; permissions in docs/agent-vm.md, Hibernate and wake).
+homepage_agent_power_user: "agentpower@pve"
+homepage_agent_power_token_name: "homepage"
+# Same as homelab_vms.agent01.proxmox_id in vars/vms.yml, which this play does not load.
+homepage_agent_vmid: 110
+# Where hibernation writes the VM's memory (up to its full RAM size).
+homepage_agent_state_storage: local-lvm
+
+# Grafana server admin; the Grafana widget reads /api/admin/stats, which needs it.
+homepage_grafana_user: admin
+
+# Quick links at the top of the admin dashboard.
+homepage_admin_links:
+  - name: GitHub
+    href: https://github.com
+    icon: github.png
+  - name: IS MUNI
+    href: https://is.muni.cz
+    icon: mdi-school-outline
+  - name: Cloudflare
+    href: https://dash.cloudflare.com
+    icon: cloudflare.png
+  - name: Claude
+    href: https://claude.ai
+    icon: claude-ai.png
+
+# Apps every member of `users` can open; both dashboards list them.
+homepage_user_apps:
+  - name: Actual Budget
+    href: "https://budget.{{ homelab_domain }}"
+    icon: actual-budget.png
+    description: Rozpočet
+  - name: Nextcloud
+    href: "https://{{ nextcloud_domain }}"
+    icon: nextcloud.png
+    description: Soubory
+  - name: openGym
+    href: "https://{{ fit_domain }}"
+    icon: mdi-dumbbell
+    description: Trénink v posilovně
+  - name: BentoPDF
+    href: "https://pdf.{{ homelab_domain }}"
+    icon: bentopdf.png
+    description: Úpravy PDF
+  - name: OmniTools
+    href: "https://tools.{{ homelab_domain }}"
+    icon: mdi-toolbox-outline
+    description: Drobné nástroje
+  - name: CyberChef
+    href: "https://cyberchef.{{ homelab_domain }}"
+    icon: cyberchef.png
+    description: Převody a kódování dat
+
+# PromQL for the pve01 resources card, rendered by homepage-api as
+# "used / total GB". Temperature prefers the CPU sensor chips (Intel/AMD) and
+# falls back to the hottest hwmon sensor; it is the series Grafana's
+# "Hardware Temperature Monitor" panel draws.
+homepage_api_queries:
+  cpu: 100 * (1 - avg(rate(node_cpu_seconds_total{host="pve01",mode="idle"}[2m])))
+  temperature: >-
+    max(node_hwmon_temp_celsius{host="pve01"}
+    and on(chip) node_hwmon_chip_names{host="pve01",chip_name=~"coretemp|k10temp|zenpower"})
+    or max(node_hwmon_temp_celsius{host="pve01"})
+  memory_used: node_memory_MemTotal_bytes{host="pve01"} - node_memory_MemAvailable_bytes{host="pve01"}
+  memory_total: node_memory_MemTotal_bytes{host="pve01"}
+  storage_used: sum(pve_disk_usage_bytes{id=~"storage/.+/local-lvm"})
+  storage_total: sum(pve_disk_size_bytes{id=~"storage/.+/local-lvm"})

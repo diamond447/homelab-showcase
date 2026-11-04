@@ -1,0 +1,8 @@
+---
+agentnet_web_dir: /opt/agentnet-web
+agentnet_web_python_version: "3.13"
+# agentnet runs on the egress proxy; the web app calls it over SSH.
+agentnet_web_backend_host: "{{ agents_egress_host }}"
+agentnet_web_backend_inventory_host: egress01
+# edge01, the only client allowed to talk to the app.
+agentnet_web_trusted_proxy: "{{ edge01_host }}"

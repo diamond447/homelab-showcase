@@ -1,0 +1,198 @@
+---
+- name: Deploy agents bridge isolation script
+  ansible.builtin.template:
+    src: agents-bridge-isolation.sh.j2
+    dest: "{{ pve_vms_isolation_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create isolated agents bridge
+  ansible.builtin.blockinfile:
+    path: /etc/network/interfaces
+    marker: "# {mark} ANSIBLE MANAGED: {{ agents_bridge }}"
+    block: |
+      auto {{ agents_bridge }}
+      iface {{ agents_bridge }} inet manual
+          bridge-ports none
+          bridge-stp off
+          bridge-fd 0
+          post-up {{ pve_vms_isolation_script }}
+      #Isolated agents network, routed only by OpenWrt
+  notify: Reload network interfaces
+
+- name: Apply network changes before attaching NICs
+  ansible.builtin.meta: flush_handlers
+
+- name: Isolate the Proxmox host from the agents bridge
+  ansible.builtin.command: "{{ pve_vms_isolation_script }}"
+  register: pve_vms_isolation
+  changed_when: "'changed' in pve_vms_isolation.stdout"
+
+- name: Look up OpenWrt VM id
+  ansible.builtin.shell: |
+    set -o pipefail
+    qm list | awk -v name="{{ agents_openwrt_vm_name }}" '$2 == name { print $1 }'
+  args:
+    executable: /bin/bash
+  register: pve_vms_openwrt_vmid
+  changed_when: false
+  failed_when: pve_vms_openwrt_vmid.stdout | length == 0
+
+# The fixed MAC lets the OpenWrt role find this NIC regardless of its ethN name.
+- name: Attach OpenWrt VM to agents bridge
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config=$(qm config {{ pve_vms_openwrt_vmid.stdout }})
+    if grep -q "bridge={{ agents_bridge }}" <<<"$config"; then
+      echo unchanged
+      exit 0
+    fi
+    for i in $(seq 0 31); do
+      if ! grep -q "^net${i}:" <<<"$config"; then
+        qm set {{ pve_vms_openwrt_vmid.stdout }} --net${i} "virtio={{ agents_openwrt_mac }},bridge={{ agents_bridge }}"
+        exit 0
+      fi
+    done
+    echo "no free netN slot" >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  register: pve_vms_openwrt_nic
+  changed_when: pve_vms_openwrt_nic.stdout != "unchanged"
+
+- name: Create cloud image directory
+  ansible.builtin.file:
+    path: "{{ pve_vms_image_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Download Debian cloud image
+  ansible.builtin.get_url:
+    url: "{{ pve_vms_image_url }}"
+    dest: "{{ pve_vms_image_dir }}/{{ pve_vms_image_name }}"
+    checksum: "{{ pve_vms_image_checksum }}"
+    mode: "0644"
+
+- name: Check which VMs already exist
+  ansible.builtin.command: "qm status {{ item.value.proxmox_id }}"
+  loop: "{{ homelab_vms | dict2items }}"
+  register: pve_vms_vm_status
+  changed_when: false
+  failed_when: false
+
+- name: Write admin SSH key for cloud-init
+  ansible.builtin.copy:
+    content: "{{ admin_ssh_public_key }}\n"
+    dest: /root/.homelab-admin.pub
+    mode: "0600"
+
+# Created with qm on the host: importing a local cloud image is not possible
+# through the API with a token.
+- name: Create missing VMs
+  ansible.builtin.command:
+    argv:
+      - qm
+      - create
+      - "{{ item.item.value.proxmox_id }}"
+      - --name
+      - "{{ item.item.key }}"
+      - --ostype
+      - l26
+      - --machine
+      - q35
+      - --cpu
+      - host
+      - --cores
+      - "{{ item.item.value.cores | default(2) }}"
+      - --memory
+      - "{{ item.item.value.memory | default(2048) }}"
+      - --balloon
+      - "{{ item.item.value.balloon | default(0) }}"
+      - --scsihw
+      - virtio-scsi-single
+      - --scsi0
+      - >-
+        {{ pve_vms_storage }}:0,import-from={{ pve_vms_image_dir }}/{{ pve_vms_image_name }},discard=on,ssd=1,iothread=1
+      - --ide2
+      - "{{ pve_vms_storage }}:cloudinit"
+      - --boot
+      - order=scsi0
+      - --serial0
+      - socket
+      - --vga
+      - serial0
+      - --agent
+      - enabled=1
+      - --net0
+      - "virtio,bridge={{ item.item.value.bridge | default(homelab_bridge) }},firewall=0"
+      - --ipconfig0
+      - "ip={{ vm_prefix }}.{{ item.item.value.proxmox_id }}/24,gw={{ vm_gateway }}"
+      - --nameserver
+      - "{{ vm_gateway }}"
+      # Packages are upgraded by the common role once the network is ready.
+      - --ciupgrade
+      - "0"
+      - --ciuser
+      - "{{ admin_user }}"
+      - --sshkeys
+      - /root/.homelab-admin.pub
+      - --onboot
+      - "1"
+  vars:
+    vm_prefix: "{{ item.item.value.network_prefix | default(homelab_network_prefix) }}"
+    vm_gateway: "{{ item.item.value.gateway | default(homelab_gateway) }}"
+  loop: "{{ pve_vms_vm_status.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  when: item.rc != 0
+  changed_when: true
+
+- name: Grow disks of newly created VMs
+  ansible.builtin.command: >-
+    qm disk resize {{ item.item.value.proxmox_id }} scsi0 {{ item.item.value.disk_gb }}G
+  loop: "{{ pve_vms_vm_status.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  when: item.rc != 0
+  changed_when: true
+
+- name: Read VM power state
+  ansible.builtin.command: "qm status {{ item.value.proxmox_id }}"
+  loop: "{{ homelab_vms | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: pve_vms_vm_power
+  changed_when: false
+
+- name: Start stopped VMs
+  ansible.builtin.command: "qm start {{ item.item.value.proxmox_id }}"
+  loop: "{{ pve_vms_vm_power.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  when: "'status: running' not in item.stdout"
+  changed_when: true
+
+# With firewall=1, PVE puts the NIC behind its own fwbr bridge, where the host
+# answers ARP again and the -i {{ agents_bridge }} rules do not match.
+- name: Find guests with the PVE firewall enabled on the agents bridge
+  ansible.builtin.shell: |
+    set -euo pipefail
+    { qm list | awk 'NR > 1 { print "qm " $1 }'; pct list | awk 'NR > 1 { print "pct " $1 }'; } |
+      while read -r tool id; do
+        if "$tool" config "$id" </dev/null | grep -E '^net[0-9]+:' | grep -E 'bridge={{ agents_bridge }}(,|$)' | grep -E 'firewall=1' >/dev/null; then
+          echo "$id"
+        fi
+      done
+  args:
+    executable: /bin/bash
+  register: pve_vms_agents_firewall_nics
+  changed_when: false
+
+- name: Refuse the PVE firewall on agents bridge NICs
+  ansible.builtin.assert:
+    that: pve_vms_agents_firewall_nics.stdout | length == 0
+    fail_msg: >-
+      Guests {{ pve_vms_agents_firewall_nics.stdout_lines | join(', ') }} have firewall=1 on a
+      {{ agents_bridge }} NIC, which bypasses the host isolation. Set firewall=0 on that NIC.
+    quiet: true

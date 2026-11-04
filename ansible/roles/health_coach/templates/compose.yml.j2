@@ -1,0 +1,107 @@
+# Managed by Ansible (role health_coach). Each service reads only its own env file.
+services:
+  db:
+    image: {{ health_coach_postgres_image }}
+    restart: unless-stopped
+    mem_limit: 512m
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "{{ health_coach_host }}:{{ health_coach_db_port }}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    env_file:
+      - db.env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U health -d health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  migrate:
+    image: {{ health_coach_image }}
+    mem_limit: 256m
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # The image entrypoint is `health-coach`; run both steps through a shell.
+    entrypoint: ["sh", "-c", "health-coach db upgrade && health-coach db sync-roles"]
+    env_file:
+      - migrate.env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  worker:
+    image: {{ health_coach_image }}
+    restart: unless-stopped
+    mem_limit: 384m
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: [worker]
+    env_file:
+      - worker.env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  mcp:
+    image: {{ health_coach_image }}
+    restart: unless-stopped
+    mem_limit: 384m
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: [mcp]
+    ports:
+      - "{{ health_coach_host }}:{{ health_coach_mcp_port }}:8080"
+    env_file:
+      - mcp.env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  web:
+    image: {{ health_coach_image }}
+    restart: unless-stopped
+    mem_limit: 192m
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: [web]
+    ports:
+      - "{{ health_coach_host }}:{{ health_coach_web_port }}:8090"
+    env_file:
+      - web.env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  db-data:

@@ -1,0 +1,12 @@
+# Managed by Ansible. DNS for the agents zone ({{ agents_network_prefix }}.0/24), which
+# OpenWrt redirects here. Every name resolves to {{ egress_proxy_sinkhole_ip }} and
+# nothing is forwarded, so DNS cannot carry data out. Web traffic to that address
+# is redirected to nginx, which resolves the real name from SNI / Host itself.
+listen-address={{ agents_egress_host }}
+bind-interfaces
+no-resolv
+no-hosts
+address=/#/{{ egress_proxy_sinkhole_ip }}
+# Answer every other record type (AAAA, SRV, MX, PTR, ...) with an empty result
+# instead of REFUSED, which some resolvers treat as a failed lookup.
+local=/#/

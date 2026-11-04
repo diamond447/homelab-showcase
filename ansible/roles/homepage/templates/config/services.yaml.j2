@@ -1,0 +1,139 @@
+---
+# Managed by Ansible (role homepage), {{ homepage_variant }} dashboard.
+# HOMEPAGE_VAR_* placeholders are filled in by Homepage from admins.env.
+# Group order on the page comes from `layout` in settings.yaml.
+{% set admins = homepage_variant == 'admins' %}
+{% set kuma_url = 'http://' ~ uptime_kuma_host ~ ':' ~ uptime_kuma_port %}
+{% set prometheus_url = 'http://' ~ monitor_host ~ ':' ~ prometheus_port %}
+{% if admins %}
+- Odkazy:
+{% for link in homepage_admin_links %}
+    - {{ link.name | to_json(ensure_ascii=False) }}:
+        href: {{ link.href | to_json(ensure_ascii=False) }}
+        icon: {{ link.icon | to_json(ensure_ascii=False) }}
+        target: _blank
+{% endfor %}
+
+{% endif %}
+# No siteMonitor on the apps: probing them would only hit the Authentik
+# redirect on edge. Uptime Kuma already watches their auth gates.
+- Aplikace:
+{% for app in homepage_user_apps %}
+    - {{ app.name | to_json(ensure_ascii=False) }}:
+        href: {{ app.href | to_json(ensure_ascii=False) }}
+        icon: {{ app.icon | to_json(ensure_ascii=False) }}
+        description: {{ app.description | to_json(ensure_ascii=False) }}
+{% endfor %}
+{% if admins %}
+
+- Zdroje:
+    - pve01:
+        icon: proxmox.png
+        description: CPU, teplota, RAM a local-lvm
+        widget:
+          type: customapi
+          url: http://homepage-api:8080/stats
+          refreshInterval: 15000
+          mappings:
+            - field: cpu
+              label: CPU
+            - field: temperature
+              label: Teplota
+            - field: memory
+              label: RAM
+            - field: storage
+              label: Úložiště
+    - agent01:
+        icon: mdi-robot-outline
+        description: Agent VM
+        widget:
+          type: iframe
+          name: agent01
+          src: /_homelab/agent/
+          classes: h-14
+          allowScrolling: "no"
+{% endif %}
+
+- Stav:
+    - Uptime Kuma:
+        href: "https://{{ uptime_kuma_domain }}{{ '/admin' if admins else '/' }}"
+        icon: uptime-kuma.png
+        description: Stav služeb
+        widget:
+          type: uptimekuma
+          url: "{{ kuma_url }}"
+          slug: "{{ homepage_uptime_kuma_slug }}"
+{% if admins %}
+
+- Infrastruktura:
+    - Proxmox:
+        href: "https://{{ pve_host }}:8006"
+        icon: proxmox.png
+        description: pve01 (jen z LAN)
+        widget:
+          type: proxmox
+          url: "https://{{ pve_host }}:8006"
+          username: "{{ homepage_proxmox_user }}!{{ homepage_proxmox_token_name }}"
+          password: "{% raw %}{{HOMEPAGE_VAR_PROXMOX_TOKEN}}{% endraw %}"
+    - Authentik:
+        href: "https://{{ authentik_domain }}/if/admin/"
+        icon: authentik.png
+        description: Identity provider
+        widget:
+          type: authentik
+          version: 2
+          url: "http://{{ authentik_host }}:{{ authentik_port }}"
+          key: "{% raw %}{{HOMEPAGE_VAR_AUTHENTIK_TOKEN}}{% endraw %}"
+    - agentnet:
+        href: "https://{{ agentnet_domain }}"
+        icon: mdi-lan-check
+        description: Egress allowlist pro agenty
+
+- Monitoring:
+    - Grafana:
+        href: "https://{{ grafana_domain }}"
+        icon: grafana.png
+        description: Dashboardy
+        widget:
+          type: grafana
+          version: 2
+          url: "http://{{ monitor_host }}:{{ grafana_port }}"
+          username: "{{ homepage_grafana_user }}"
+          password: "{% raw %}{{HOMEPAGE_VAR_GRAFANA_PASSWORD}}{% endraw %}"
+    - Zdraví:
+        href: "https://{{ grafana_domain }}/dashboards?tag=health-coach"
+        icon: mdi-heart-pulse
+        description: Health Coach dashboardy
+    - Healthstats:
+        href: "https://{{ healthstats_domain }}"
+        icon: mdi-heart-flash
+        description: Recovery, spánek, strain
+    - Prometheus:
+        href: "https://{{ prometheus_domain }}"
+        icon: prometheus.png
+        description: Metriky
+        widget:
+          type: prometheus
+          url: "{{ prometheus_url }}"
+    - Alertmanager:
+        href: "https://{{ alertmanager_domain }}"
+        icon: alertmanager.png
+        description: Alerty do ntfy
+        widget:
+          type: prometheusmetric
+          url: "{{ prometheus_url }}"
+          refreshInterval: 30000
+          metrics:
+            - label: Aktivní alerty
+              query: sum(alertmanager_alerts{state="active"}) or vector(0)
+              format:
+                type: number
+            - label: Umlčené
+              query: sum(alertmanager_silences{state="active"}) or vector(0)
+              format:
+                type: number
+    - ntfy:
+        href: "https://{{ ntfy_domain }}"
+        icon: ntfy.png
+        description: Push notifikace
+{% endif %}

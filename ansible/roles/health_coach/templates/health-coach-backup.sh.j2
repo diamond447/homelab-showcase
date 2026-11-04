@@ -1,0 +1,66 @@
+#!/bin/sh
+# Nightly backup of the Health Coach database and the Fit data (openGym, Fit MCP links).
+# Managed by Ansible (role health_coach). Each database is dumped on its own, so one
+# failure does not skip the other; the script still exits non-zero, which triggers
+# the OnFailure alert of health-coach-backup.service.
+set -u
+
+BACKUP_DIR="{{ health_coach_backup_dir }}"
+DATE="$(date +%Y%m%d_%H%M%S)"
+KEEP_DAYS=30
+KEEP_MIN=7
+umask 077
+mkdir -p "$BACKUP_DIR"
+failed=0
+
+dump() {  # name compose-file user database
+    out="$BACKUP_DIR/$1-$DATE.dump"
+    # Written to a temp name first, so a failed dump never looks complete.
+    if docker compose -f "$2" exec -T db pg_dump -U "$3" -Fc "$4" > "$out.part"; then
+        mv "$out.part" "$out"
+    else
+        rm -f "$out.part"
+        echo "dump of $1 failed" >&2
+        failed=1
+    fi
+}
+
+archive_fit() {
+    out="$BACKUP_DIR/fit-$DATE.tar.gz"
+    # Consistent copy of the Fit MCP SQLite file. If the container is down, the archive
+    # still gets openGym's data and the alert fires for the missing copy.
+    if ! docker compose -f {{ fit_dir }}/compose.yml exec -T mcp python -c \
+        "import sqlite3; s = sqlite3.connect('/data/fit.db'); d = sqlite3.connect('/data/fit.db.backup'); s.backup(d); d.close()"; then
+        echo "online copy of the Fit MCP database failed" >&2
+        failed=1
+    fi
+    # openGym writes its JSON files atomically (temp file + rename), so a plain tar is
+    # safe; tar exits 1 when a temp file vanished while it read the directory, which is
+    # fine here. The live SQLite file and its journals are left out.
+    tar -C {{ fit_dir }}/data -czf "$out.part" \
+        --warning=no-file-changed --warning=no-file-removed \
+        --exclude=fit-mcp/fit.db --exclude='fit-mcp/fit.db-*' opengym fit-mcp
+    if [ $? -le 1 ]; then
+        mv "$out.part" "$out"
+    else
+        rm -f "$out.part"
+        echo "archive of fit data failed" >&2
+        failed=1
+    fi
+}
+
+prune() {  # name: delete old backups but always keep the newest KEEP_MIN
+    ls -1t "$BACKUP_DIR/$1-"* 2>/dev/null | tail -n +$((KEEP_MIN + 1)) | while read -r f; do
+        find "$f" -mtime +"$KEEP_DAYS" -delete
+    done
+}
+
+dump health {{ health_coach_dir }}/compose.yml health health
+if [ -f {{ fit_dir }}/compose.yml ]; then
+    archive_fit
+fi
+prune health
+prune fit
+find "$BACKUP_DIR" -name "*.part" -mtime +1 -delete
+
+exit "$failed"

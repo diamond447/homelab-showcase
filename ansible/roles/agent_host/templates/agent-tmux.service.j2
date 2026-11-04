@@ -1,0 +1,15 @@
+[Unit]
+Description=Persistent tmux session for the agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User={{ agent_host_user }}
+WorkingDirectory={{ agent_host_workspace }}
+ExecStart=/usr/bin/tmux new-session -d -s agent -c {{ agent_host_workspace }}
+ExecStop=/usr/bin/tmux kill-session -t agent
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

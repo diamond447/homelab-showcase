@@ -1,0 +1,241 @@
+---
+- name: Assert Nextcloud secrets are set
+  ansible.builtin.assert:
+    that:
+      - vault_nextcloud_postgres_password | default('') | length > 0
+      - vault_nextcloud_admin_password | default('') | length > 0
+      - vault_nextcloud_oidc_client_secret | default('') | length > 0
+      - vault_ntfy_nextcloud_token | default('') | length > 0
+    fail_msg: >-
+      Add vault_nextcloud_postgres_password, vault_nextcloud_admin_password and
+      vault_nextcloud_oidc_client_secret (e.g. `openssl rand -hex 32`) and
+      vault_ntfy_nextcloud_token (`ntfy token generate`) to vars/vault.yml.
+    quiet: true
+
+# Restrict LAN access to the Docker-published port on nextcloud01
+- name: Deploy Nextcloud firewall script
+  ansible.builtin.template:
+    src: nextcloud-firewall.sh.j2
+    dest: "{{ nextcloud_firewall_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: nextcloud_firewall_script
+
+- name: Deploy Nextcloud firewall systemd service
+  ansible.builtin.template:
+    src: nextcloud-firewall.service.j2
+    dest: /etc/systemd/system/nextcloud-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: nextcloud_firewall_unit
+
+# Applied right away, not in a handler: the port must never be published without its rules.
+- name: Enable and start Nextcloud firewall service
+  ansible.builtin.systemd:
+    name: nextcloud-firewall
+    enabled: true
+    state: "{{ 'restarted' if nextcloud_firewall_script.changed or nextcloud_firewall_unit.changed else 'started' }}"
+    daemon_reload: true
+
+- name: Create Nextcloud application directory
+  ansible.builtin.file:
+    path: "{{ nextcloud_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# www-data (33) in the Debian-based image owns the user files.
+- name: Create Nextcloud data directory
+  ansible.builtin.file:
+    path: "{{ nextcloud_data_dir }}"
+    state: directory
+    owner: "33"
+    group: "33"
+    mode: "0770"
+
+- name: Create Nextcloud database dump directory
+  ansible.builtin.file:
+    path: "{{ nextcloud_dump_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Deploy Nextcloud env files
+  ansible.builtin.template:
+    src: "{{ item }}.env.j2"
+    dest: "{{ nextcloud_dir }}/{{ item }}.env"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: [db, app]
+  notify: Restart Nextcloud
+  no_log: true
+
+- name: Deploy Nextcloud compose file
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ nextcloud_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Nextcloud
+
+- name: Start Nextcloud
+  community.docker.docker_compose_v2:
+    project_src: "{{ nextcloud_dir }}"
+    pull: always
+    state: present
+    wait: true
+
+# The first start copies the code into the volume and installs Nextcloud.
+- name: Wait until Nextcloud is installed
+  community.docker.docker_container_exec:
+    container: nextcloud-app-1
+    user: www-data
+    argv: [php, occ, status, --output=json]
+  register: nextcloud_status
+  until: >-
+    nextcloud_status.rc | default(1) == 0
+    and nextcloud_status.stdout is match('\\s*\\{')
+    and (nextcloud_status.stdout | from_json).installed | default(false)
+    and not (nextcloud_status.stdout | from_json).maintenance | default(true)
+  retries: 60
+  delay: 5
+  changed_when: false
+
+# All of these set a value or add what is missing; repeating them is harmless.
+- name: Configure Nextcloud
+  community.docker.docker_container_exec:
+    container: nextcloud-app-1
+    user: www-data
+    argv: "{{ ['php', 'occ'] + item }}"
+  loop:
+    - [background:cron]
+    - [config:system:set, default_phone_region, "--value={{ nextcloud_phone_region }}"]
+    # Heavy background jobs between 01:00 and 05:00 UTC.
+    - [config:system:set, maintenance_window_start, --type=integer, --value=1]
+    - [config:system:set, files.chunked_upload.max_size, --type=integer, "--value={{ nextcloud_max_chunk_size }}"]
+    # Never sign an Authentik user into an existing local account of the same name
+    # (such as admin); user_oidc only links accounts it created itself.
+    - [config:system:set, user_oidc, soft_auto_provision, --type=boolean, --value=false]
+    - [db:add-missing-indices]
+    # Any fixed value in 0-1023 for a single server; part of generated IDs.
+    - [config:system:set, serverid, --type=integer, --value=1]
+  register: nextcloud_config
+  changed_when: false
+  failed_when: nextcloud_config.rc != 0
+
+- name: List Nextcloud apps
+  community.docker.docker_container_exec:
+    container: nextcloud-app-1
+    user: www-data
+    argv: [php, occ, app:list, --output=json]
+  register: nextcloud_apps
+  changed_when: false
+  failed_when: nextcloud_apps.rc != 0
+
+- name: Install the OpenID Connect user backend
+  community.docker.docker_container_exec:
+    container: nextcloud-app-1
+    user: www-data
+    argv:
+      - php
+      - occ
+      - "{{ 'app:enable' if 'user_oidc' in (nextcloud_apps.stdout | from_json).disabled else 'app:install' }}"
+      - user_oidc
+  when: "'user_oidc' not in (nextcloud_apps.stdout | from_json).enabled"
+  register: nextcloud_oidc_app
+  changed_when: true
+  failed_when: nextcloud_oidc_app.rc != 0
+
+# External apps would need a Docker deploy daemon, which this setup does not run.
+- name: Disable AppAPI
+  community.docker.docker_container_exec:
+    container: nextcloud-app-1
+    user: www-data
+    argv: [php, occ, app:disable, app_api]
+  when: "'app_api' in (nextcloud_apps.stdout | from_json).enabled"
+  register: nextcloud_app_api
+  changed_when: true
+  failed_when: nextcloud_app_api.rc != 0
+
+# Creates or updates the provider. Usernames come from Authentik as they are
+# (no hashed IDs), so renaming someone in Authentik gives them a new account.
+- name: Configure the Authentik login
+  community.docker.docker_container_exec:
+    container: nextcloud-app-1
+    user: www-data
+    env:
+      NC_OIDC_CLIENT_SECRET: "{{ vault_nextcloud_oidc_client_secret }}"
+    argv:
+      - php
+      - occ
+      - user_oidc:provider
+      - Authentik
+      - "--clientid={{ nextcloud_oidc_client_id }}"
+      - --clientsecret-env=NC_OIDC_CLIENT_SECRET
+      - "--discoveryuri=https://{{ authentik_domain }}/application/o/{{ nextcloud_oidc_slug }}/.well-known/openid-configuration"
+      - --scope=openid email profile
+      - --unique-uid=0
+      - --mapping-uid=preferred_username
+      - --mapping-display-name=name
+      - --mapping-email=email
+  register: nextcloud_oidc_provider
+  no_log: true
+  changed_when: false
+  failed_when: nextcloud_oidc_provider.rc != 0
+
+# Sends the login page straight to Authentik; the local admin uses /login?direct=1.
+- name: Make Authentik the only login
+  community.docker.docker_container_exec:
+    container: nextcloud-app-1
+    user: www-data
+    argv: [php, occ, config:app:set, --type=string, --value=0, user_oidc, allow_multiple_user_backends]
+  register: nextcloud_oidc_only
+  changed_when: false
+  failed_when: nextcloud_oidc_only.rc != 0
+
+- name: Deploy Nextcloud database dump script
+  ansible.builtin.template:
+    src: nextcloud-db-dump.sh.j2
+    dest: /usr/local/sbin/nextcloud-db-dump
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install curl for the dump failure alert
+  ansible.builtin.apt:
+    name: curl
+    state: present
+
+- name: Deploy the dump failure alert settings (the token is secret)
+  ansible.builtin.template:
+    src: nextcloud-db-dump-alert.env.j2
+    dest: /etc/nextcloud-db-dump-alert.env
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Deploy Nextcloud database dump units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - nextcloud-db-dump.service
+    - nextcloud-db-dump.timer
+    - nextcloud-db-dump-alert.service
+
+- name: Enable Nextcloud database dump timer
+  ansible.builtin.systemd:
+    name: nextcloud-db-dump.timer
+    enabled: true
+    state: started
+    daemon_reload: true

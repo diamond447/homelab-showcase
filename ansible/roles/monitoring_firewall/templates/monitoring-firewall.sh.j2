@@ -1,0 +1,27 @@
+#!/bin/sh
+# Restricts LAN access to the monitoring APIs published by Docker on monitor01.
+# Managed by Ansible (role monitoring_firewall). Replaces its own chain atomically
+# on every run, so removed ports or sources do not leave stale rules behind.
+set -eu
+
+CHAIN="{{ monitoring_firewall_chain }}"
+
+# Declaring the chain in --noflush mode replaces its rules in one transaction.
+iptables-restore -w --noflush <<RULES
+*filter
+:$CHAIN - [0:0]
+{% for restricted in monitoring_firewall_restricted_ports %}
+{% for source in restricted.sources %}
+-A $CHAIN -i {{ monitoring_firewall_interface }} -p tcp -s {{ source }} -m conntrack --ctdir ORIGINAL --ctorigdstport {{ restricted.port }} -j RETURN
+{% endfor %}
+-A $CHAIN -i {{ monitoring_firewall_interface }} -p tcp -m conntrack --ctdir ORIGINAL --ctorigdstport {{ restricted.port }} -j DROP
+{% endfor %}
+{% for port in monitoring_firewall_dropped_ports %}
+-A $CHAIN -i {{ monitoring_firewall_interface }} -p tcp -m conntrack --ctdir ORIGINAL --ctorigdstport {{ port }} -j DROP
+{% endfor %}
+COMMIT
+RULES
+
+# Docker creates DOCKER-USER and jumps to it from FORWARD for published ports.
+iptables -w -N DOCKER-USER 2>/dev/null || true
+iptables -w -C DOCKER-USER -j "$CHAIN" 2>/dev/null || iptables -w -I DOCKER-USER -j "$CHAIN"

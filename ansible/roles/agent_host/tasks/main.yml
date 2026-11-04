@@ -1,0 +1,209 @@
+---
+- name: Install agent tooling
+  ansible.builtin.apt:
+    name: "{{ agent_host_packages }}"
+    state: present
+    update_cache: true
+
+# Static unit, started by udev when the virtio port exists.
+- name: Start QEMU guest agent
+  ansible.builtin.service:
+    name: qemu-guest-agent
+    state: started
+
+- name: Create timesyncd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/timesyncd.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Only the gateway is reachable for NTP from the agents zone. After the VM
+# resumes from hibernation its clock is behind by the time it slept; polling
+# at least every 64 s lets timesyncd step it back within about a minute.
+- name: Sync time from the gateway
+  ansible.builtin.copy:
+    dest: /etc/systemd/timesyncd.conf.d/homelab.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Time]
+      NTP={{ ansible_default_ipv4.gateway }}
+      PollIntervalMaxSec=64
+  notify: Restart timesyncd
+
+- name: Add GitHub CLI repository
+  ansible.builtin.deb822_repository:
+    name: github-cli
+    types:
+      - deb
+    uris:
+      - https://cli.github.com/packages
+    suites:
+      - stable
+    components:
+      - main
+    signed_by: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+    state: present
+
+- name: Install GitHub CLI
+  ansible.builtin.apt:
+    name: gh
+    state: present
+    update_cache: true
+
+- name: Create agent user
+  ansible.builtin.user:
+    name: "{{ agent_host_user }}"
+    shell: /bin/bash
+    groups:
+      - docker
+    append: true
+    create_home: true
+
+- name: Allow agent passwordless sudo
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ agent_host_user }}"
+    content: "{{ agent_host_user }} ALL=(ALL) NOPASSWD: ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "/usr/sbin/visudo -cf %s"
+  when: agent_host_passwordless_sudo
+
+- name: Remove agent sudo rights
+  ansible.builtin.file:
+    path: "/etc/sudoers.d/{{ agent_host_user }}"
+    state: absent
+  when: not agent_host_passwordless_sudo
+
+- name: Install admin SSH key for agent
+  ansible.posix.authorized_key:
+    user: "{{ agent_host_user }}"
+    key: "{{ admin_ssh_public_key }}"
+    state: present
+
+- name: Create agent workspace
+  ansible.builtin.file:
+    path: "{{ agent_host_workspace }}"
+    state: directory
+    owner: "{{ agent_host_user }}"
+    group: "{{ agent_host_user }}"
+    mode: "0755"
+
+- name: Configure agent git identity
+  community.general.git_config:
+    scope: global
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+  loop:
+    - name: user.name
+      value: "{{ agent_host_git_name }}"
+    - name: user.email
+      value: "{{ agent_host_git_email }}"
+    - name: init.defaultBranch
+      value: main
+  become: true
+  become_user: "{{ agent_host_user }}"
+
+- name: Install Claude Code
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -fsSL https://claude.ai/install.sh | bash
+  args:
+    executable: /bin/bash
+    creates: "{{ agent_host_home }}/.local/bin/claude"
+  become: true
+  become_user: "{{ agent_host_user }}"
+
+- name: Create Claude config directory
+  ansible.builtin.file:
+    path: "{{ agent_host_home }}/.claude"
+    state: directory
+    owner: "{{ agent_host_user }}"
+    group: "{{ agent_host_user }}"
+    mode: "0700"
+
+- name: Install Claude Code status line script
+  ansible.builtin.copy:
+    src: statusline-command.sh
+    dest: "{{ agent_host_home }}/.claude/statusline-command.sh"
+    owner: "{{ agent_host_user }}"
+    group: "{{ agent_host_user }}"
+    mode: "0755"
+
+- name: Check for existing Claude Code settings
+  ansible.builtin.stat:
+    path: "{{ agent_host_home }}/.claude/settings.json"
+  register: agent_host_claude_settings_file
+
+- name: Read existing Claude Code settings
+  ansible.builtin.slurp:
+    src: "{{ agent_host_home }}/.claude/settings.json"
+  register: agent_host_claude_settings_current
+  when: agent_host_claude_settings_file.stat.exists
+
+# Only the managed keys are set; everything else in the file (plugins, extra
+# permission rules, /config changes) is kept. An unparsable file makes this
+# task fail instead of being replaced.
+# bypassPermissions is refused for root, which is why the agent is its own user.
+- name: Merge managed Claude Code settings
+  ansible.builtin.copy:
+    content: "{{ agent_host_claude_settings_merged | to_nice_json(indent=2) }}\n"
+    dest: "{{ agent_host_home }}/.claude/settings.json"
+    owner: "{{ agent_host_user }}"
+    group: "{{ agent_host_user }}"
+    mode: "0600"
+    validate: "/usr/bin/python3 -m json.tool %s"
+  vars:
+    agent_host_claude_settings_existing: >-
+      {{
+        (agent_host_claude_settings_current.content | b64decode | from_json)
+        if agent_host_claude_settings_file.stat.exists else {}
+      }}
+    agent_host_claude_settings_merged: >-
+      {{ agent_host_claude_settings_existing | combine(agent_host_claude_settings, recursive=True) }}
+
+- name: Configure tmux
+  ansible.builtin.copy:
+    dest: "{{ agent_host_home }}/.tmux.conf"
+    owner: "{{ agent_host_user }}"
+    group: "{{ agent_host_user }}"
+    mode: "0644"
+    content: |
+      set -g mouse on
+      set -g history-limit 100000
+      set -g default-terminal "tmux-256color"
+
+# Never restart the session from Ansible: that would kill a running agent.
+
+- name: Install agent tmux service
+  ansible.builtin.template:
+    src: agent-tmux.service.j2
+    dest: /etc/systemd/system/agent-tmux.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Enable agent tmux service
+  ansible.builtin.systemd:
+    name: agent-tmux
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# Tailscale would reach its DERP relays over HTTPS and tunnel past the egress
+# proxy, so it is kept off the agent VM. Access goes via SSH through OpenWrt.
+- name: Remove Tailscale
+  ansible.builtin.apt:
+    name: tailscale
+    state: absent
+    purge: true
+
+- name: Remove Tailscale repository
+  ansible.builtin.deb822_repository:
+    name: tailscale
+    state: absent

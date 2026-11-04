@@ -1,0 +1,115 @@
+---
+- name: Create Grafana directory
+  ansible.builtin.file:
+    path: /opt/monitoring/grafana
+    state: directory
+    owner: root
+    group: docker
+    mode: "0775"
+
+- name: Deploy Grafana datasource
+  ansible.builtin.template:
+    src: prometheus-datasource.yml.j2
+    dest: /opt/monitoring/grafana/prometheus-datasource.yml
+    owner: root
+    group: docker
+    mode: "0644"
+  notify: Restart Grafana
+
+# Health database datasource containing PostgreSQL credentials.
+# UID 472 is the grafana user inside the container; mode 0600 ensures
+# it is readable by Grafana while inaccessible to other host users.
+- name: Deploy Grafana Health datasource
+  ansible.builtin.template:
+    src: health-datasource.yml.j2
+    dest: /opt/monitoring/grafana/health-datasource.yml
+    owner: "472"
+    group: root
+    mode: "0600"
+  notify: Restart Grafana
+  no_log: true
+
+# Note: GF_SECURITY_ADMIN_PASSWORD only sets the password when Grafana's database
+# is created; on the existing instance run `docker exec grafana grafana cli admin reset-admin-password '<password>'` once.
+- name: Deploy Grafana env file
+  ansible.builtin.template:
+    src: grafana.env.j2
+    dest: /opt/monitoring/grafana/.env
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart Grafana
+  no_log: true
+
+- name: Deploy Grafana compose
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: /opt/monitoring/grafana/compose.yml
+    owner: root
+    group: docker
+    mode: "0644"
+  notify: Restart Grafana
+
+- name: Create Grafana provisioning directory
+  ansible.builtin.file:
+    path: /opt/monitoring/grafana/provisioning/dashboards
+    state: directory
+    owner: root
+    group: docker
+    mode: "0775"
+
+- name: Create Grafana dashboards directory
+  ansible.builtin.file:
+    path: /opt/monitoring/grafana/dashboards
+    state: directory
+    owner: root
+    group: docker
+    mode: "0775"
+
+- name: Deploy dashboard provider
+  ansible.builtin.template:
+    src: dashboard-provider.yml.j2
+    dest: /opt/monitoring/grafana/provisioning/dashboards/homelab.yml
+    owner: root
+    group: docker
+    mode: "0644"
+  notify: Restart Grafana
+
+- name: Deploy Homelab Overview
+  ansible.builtin.template:
+    src: dashboards/homelab-overview.json.j2
+    dest: /opt/monitoring/grafana/dashboards/homelab-overview.json
+    owner: root
+    group: docker
+    mode: "0644"
+
+- name: Deploy Node Exporter Full dashboard
+  ansible.builtin.copy:
+    src: dashboards/node-exporter-full.json
+    dest: /opt/monitoring/grafana/dashboards/node-exporter-full.json
+    owner: root
+    group: docker
+    mode: "0644"
+
+- name: Create Grafana Health dashboards directory
+  ansible.builtin.file:
+    path: /opt/monitoring/grafana/dashboards-health
+    state: directory
+    owner: root
+    group: docker
+    mode: "0775"
+
+- name: Deploy Health Coach dashboards
+  ansible.builtin.copy:
+    src: "dashboards-health/health-{{ item }}.json"
+    dest: "/opt/monitoring/grafana/dashboards-health/health-{{ item }}.json"
+    owner: root
+    group: docker
+    mode: "0644"
+  loop: [body, recovery, training, system]
+
+- name: Start Grafana
+  community.docker.docker_compose_v2:
+    project_src: /opt/monitoring/grafana
+    state: present
+    pull: missing

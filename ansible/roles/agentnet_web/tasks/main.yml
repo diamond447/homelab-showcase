@@ -1,0 +1,104 @@
+---
+- name: Create agentnet-web directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ agentnet_web_dir }}"
+      owner: root
+      mode: "0755"
+    # uid 10001 is the agentnet user inside the container.
+    - path: "{{ agentnet_web_dir }}/ssh"
+      owner: "10001"
+      mode: "0700"
+
+- name: Deploy agentnet-web sources
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ agentnet_web_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - Dockerfile
+    - app.py
+    - index.html
+
+- name: Generate backend SSH key
+  ansible.builtin.command:
+    cmd: ssh-keygen -q -t ed25519 -N "" -C "agentnet-web@{{ inventory_hostname }}" -f {{ agentnet_web_dir }}/ssh/id_ed25519
+    creates: "{{ agentnet_web_dir }}/ssh/id_ed25519"
+
+- name: Set backend SSH key ownership
+  ansible.builtin.file:
+    path: "{{ agentnet_web_dir }}/ssh/{{ item }}"
+    owner: "10001"
+    group: "10001"
+    mode: "0600"
+  loop:
+    - id_ed25519
+    - id_ed25519.pub
+
+- name: Read backend SSH public key
+  ansible.builtin.slurp:
+    src: "{{ agentnet_web_dir }}/ssh/id_ed25519.pub"
+  register: agentnet_web_pubkey
+
+# The forced command limits this key to agentnet's list/allow/deny.
+- name: Authorize agentnet-web on the egress proxy
+  ansible.posix.authorized_key:
+    user: root
+    key: "{{ agentnet_web_pubkey.content | b64decode | trim }}"
+    key_options: >-
+      command="/usr/local/sbin/agentnet --api",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty
+    state: present
+  delegate_to: "{{ agentnet_web_backend_inventory_host }}"
+
+- name: Ensure known_hosts exists
+  ansible.builtin.file:
+    path: "{{ agentnet_web_dir }}/ssh/known_hosts"
+    state: touch
+    access_time: preserve
+    modification_time: preserve
+    mode: "0644"
+
+# Appended only when the backend host is missing, and via a temp file so a
+# failed scan never leaves a broken entry behind.
+- name: Record backend host key
+  ansible.builtin.shell:
+    cmd: |
+      kh={{ agentnet_web_dir }}/ssh/known_hosts
+      if ! ssh-keygen -F {{ agentnet_web_backend_host }} -f "$kh" >/dev/null; then
+        ssh-keyscan -T 10 {{ agentnet_web_backend_host }} 2>/dev/null > "$kh.tmp"
+        test -s "$kh.tmp"
+        cat "$kh.tmp" >> "$kh"
+        rm -f "$kh.tmp"
+        echo changed
+      fi
+    executable: /bin/bash
+  register: agentnet_web_keyscan
+  changed_when: "'changed' in agentnet_web_keyscan.stdout"
+
+- name: Set known_hosts ownership
+  ansible.builtin.file:
+    path: "{{ agentnet_web_dir }}/ssh/known_hosts"
+    owner: "10001"
+    group: "10001"
+    mode: "0644"
+
+- name: Deploy agentnet-web compose
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ agentnet_web_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Start agentnet-web
+  community.docker.docker_compose_v2:
+    project_src: "{{ agentnet_web_dir }}"
+    build: always
+    state: present

@@ -1,0 +1,7 @@
+---
+- name: Restart fit
+  community.docker.docker_compose_v2:
+    project_src: "{{ fit_dir }}"
+    pull: always
+    state: present
+    wait: true

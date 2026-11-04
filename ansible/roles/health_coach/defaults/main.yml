@@ -1,0 +1,11 @@
+---
+# Default configurations for health_coach role
+health_coach_dir: /opt/apps/health-coach
+health_coach_backup_dir: /opt/backups/health-coach
+
+health_coach_firewall_chain: HEALTH-FW
+health_coach_firewall_script_path: /usr/local/sbin/health-firewall
+health_coach_firewall_interface: "{{ ansible_default_ipv4.interface | default('eth0') }}"
+
+# Pinned PostgreSQL 16 Alpine image
+health_coach_postgres_image: "postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"

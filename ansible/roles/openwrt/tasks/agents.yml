@@ -1,0 +1,160 @@
+---
+# Isolated zone for agent VMs: no access to lan or to the router itself
+# except NTP. DNS (53) and web traffic (TCP 80/443) are redirected to the egress
+# proxy: its DNS answers every name with a sinkhole address and nginx allows web
+# traffic by host name. Everything else is rejected.
+- name: Configure agents interface, firewall zone and egress redirect
+  ansible.builtin.raw: |
+    set -e
+
+    dev=""
+    for d in /sys/class/net/*; do
+      if [ "$(cat "$d/address")" = "{{ agents_openwrt_mac | lower }}" ]; then
+        dev=$(basename "$d")
+      fi
+    done
+    if [ -z "$dev" ]; then
+      echo "NIC with MAC {{ agents_openwrt_mac }} not found" >&2
+      exit 1
+    fi
+
+    uci -q delete network.agents || true
+    uci set network.agents=interface
+    uci set network.agents.proto='static'
+    uci set network.agents.device="$dev"
+    uci set network.agents.ipaddr='{{ agents_gateway }}'
+    uci set network.agents.netmask='255.255.255.0'
+    uci set network.agents.delegate='0'
+
+    # VMs use static addresses from cloud-init.
+    uci -q delete dhcp.agents || true
+    uci set dhcp.agents=dhcp
+    uci set dhcp.agents.interface='agents'
+    uci set dhcp.agents.ignore='1'
+
+    uci -q delete firewall.agents || true
+    uci set firewall.agents=zone
+    uci set firewall.agents.name='agents'
+    uci add_list firewall.agents.network='agents'
+    uci set firewall.agents.input='REJECT'
+    uci set firewall.agents.output='ACCEPT'
+    uci set firewall.agents.forward='REJECT'
+    # Rejected packets go to the system log (logread).
+    uci set firewall.agents.log='1'
+    uci set firewall.agents.log_limit='60/minute'
+
+    uci -q delete firewall.agents_ntp || true
+    uci set firewall.agents_ntp=rule
+    uci set firewall.agents_ntp.name='Allow-Agents-NTP'
+    uci set firewall.agents_ntp.src='agents'
+    uci add_list firewall.agents_ntp.proto='udp'
+    uci set firewall.agents_ntp.dest_port='123'
+    uci set firewall.agents_ntp.target='ACCEPT'
+
+    uci -q delete firewall.agents_ping || true
+    uci set firewall.agents_ping=rule
+    uci set firewall.agents_ping.name='Allow-Agents-Ping'
+    uci set firewall.agents_ping.src='agents'
+    uci add_list firewall.agents_ping.proto='icmp'
+    uci set firewall.agents_ping.icmp_type='echo-request'
+    uci set firewall.agents_ping.target='ACCEPT'
+
+    for port in 80 443; do
+      uci -q delete firewall.agents_web_$port || true
+      uci set firewall.agents_web_$port=redirect
+      uci set firewall.agents_web_$port.name="Agents-Web-$port-to-Egress"
+      uci set firewall.agents_web_$port.src='agents'
+      uci set firewall.agents_web_$port.src_dport="$port"
+      uci set firewall.agents_web_$port.proto='tcp'
+      uci set firewall.agents_web_$port.family='ipv4'
+      uci set firewall.agents_web_$port.dest='lan'
+      uci set firewall.agents_web_$port.dest_ip='{{ agents_egress_host }}'
+      uci set firewall.agents_web_$port.dest_port="$port"
+      uci set firewall.agents_web_$port.target='DNAT'
+      uci set firewall.agents_web_$port.reflection='0'
+    done
+
+    uci -q delete firewall.agents_dns_redirect || true
+    uci set firewall.agents_dns_redirect=redirect
+    uci set firewall.agents_dns_redirect.name='Agents-DNS-to-Egress'
+    uci set firewall.agents_dns_redirect.src='agents'
+    uci set firewall.agents_dns_redirect.src_dport='53'
+    uci set firewall.agents_dns_redirect.proto='tcp udp'
+    uci set firewall.agents_dns_redirect.family='ipv4'
+    uci set firewall.agents_dns_redirect.dest='lan'
+    uci set firewall.agents_dns_redirect.dest_ip='{{ agents_egress_host }}'
+    uci set firewall.agents_dns_redirect.dest_port='53'
+    uci set firewall.agents_dns_redirect.target='DNAT'
+    uci set firewall.agents_dns_redirect.reflection='0'
+
+    # Keep the VM as the source address: the proxy only accepts the agents
+    # subnet and logs per client. Without this, masquerading on lan (or NAT
+    # reflection) would present every connection as coming from the router.
+    uci -q delete firewall.agents_no_snat || true
+    uci set firewall.agents_no_snat=nat
+    uci set firewall.agents_no_snat.name='Agents-Egress-Keep-Source'
+    uci set firewall.agents_no_snat.src='lan'
+    uci set firewall.agents_no_snat.family='ipv4'
+    uci set firewall.agents_no_snat.src_ip='{{ agents_network_prefix }}.0/24'
+    uci set firewall.agents_no_snat.dest_ip='{{ agents_egress_host }}'
+    uci add_list firewall.agents_no_snat.proto='tcp'
+    uci add_list firewall.agents_no_snat.proto='udp'
+    uci set firewall.agents_no_snat.target='ACCEPT'
+
+    # User rules run before the port-forward accept of fw4, so the redirected
+    # traffic needs its own accept ahead of the catch-all reject below.
+    uci -q delete firewall.agents_egress_proxy || true
+    uci set firewall.agents_egress_proxy=rule
+    uci set firewall.agents_egress_proxy.name='Allow-Agents-Egress-Proxy'
+    uci set firewall.agents_egress_proxy.src='agents'
+    uci set firewall.agents_egress_proxy.dest='lan'
+    uci set firewall.agents_egress_proxy.dest_ip='{{ agents_egress_host }}'
+    uci add_list firewall.agents_egress_proxy.proto='tcp'
+    uci add_list firewall.agents_egress_proxy.proto='udp'
+    uci set firewall.agents_egress_proxy.dest_port='53 80 443'
+    uci set firewall.agents_egress_proxy.target='ACCEPT'
+
+    # Everything else leaving the agents zone is rejected here, so isolation
+    # does not depend on the global forward policy of the router. Recreated after
+    # agents_egress_proxy on every run, which keeps it ordered below that rule.
+    uci -q delete firewall.agents_block || true
+    uci set firewall.agents_block=rule
+    uci set firewall.agents_block.name='Reject-Agents-Other'
+    uci set firewall.agents_block.src='agents'
+    uci set firewall.agents_block.dest='*'
+    uci set firewall.agents_block.log='1'
+    uci set firewall.agents_block.target='REJECT'
+
+    uci -q delete firewall.agents_node_exporter || true
+    uci set firewall.agents_node_exporter=rule
+    uci set firewall.agents_node_exporter.name='Allow-Monitor-Agent-Node-Exporter'
+    uci set firewall.agents_node_exporter.src='lan'
+    uci set firewall.agents_node_exporter.src_ip='{{ monitor_host }}'
+    uci set firewall.agents_node_exporter.dest='agents'
+    uci set firewall.agents_node_exporter.dest_ip='{{ agent_vm_host }}'
+    uci add_list firewall.agents_node_exporter.proto='tcp'
+    uci set firewall.agents_node_exporter.dest_port='9100'
+    uci set firewall.agents_node_exporter.target='ACCEPT'
+
+    # Serve time to the agents so they need no NTP egress.
+    uci set system.ntp.enable_server='1'
+    # Room for firewall rejects in the ring buffer (KiB).
+    uci set system.@system[0].log_size='1024'
+
+    # agentnet used to live on the router; it now runs on the egress proxy.
+    rm -f /usr/sbin/agentnet /tmp/agentnet-dns.log
+    sed -i '/agentnet/d' /etc/crontabs/root 2>/dev/null || true
+    sed -i '/agentnet --api/d' /etc/dropbear/authorized_keys 2>/dev/null || true
+    /etc/init.d/cron restart
+
+    uci commit network
+    uci commit dhcp
+    uci commit firewall
+    uci commit system
+
+    /etc/init.d/network reload
+    /etc/init.d/firewall reload
+    /etc/init.d/dnsmasq restart
+    /etc/init.d/sysntpd restart
+    /etc/init.d/log restart
+  changed_when: false

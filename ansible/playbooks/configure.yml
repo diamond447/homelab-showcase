@@ -1,0 +1,79 @@
+---
+- name: Build homelab inventory
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/containers.yml
+    - ../vars/vms.yml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Add homelab containers to runtime inventory
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        groups:
+          - homelab
+        ansible_host: "{{ homelab_network_prefix }}.{{ item.value.proxmox_id }}"
+        ansible_user: admin
+        homelab_roles: "{{ item.value.roles | default(['common']) }}"
+      loop: "{{ homelab_containers | dict2items }}"
+      changed_when: false
+
+    - name: Add homelab VMs to runtime inventory
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        groups:
+          - homelab
+        ansible_host: "{{ item.value.network_prefix | default(homelab_network_prefix) }}.{{ item.value.proxmox_id }}"
+        ansible_user: admin
+        ansible_ssh_common_args: "{{ agents_ssh_common_args if item.value.bridge | default(homelab_bridge) == agents_bridge else '' }}"
+        homelab_roles: "{{ item.value.roles | default(['common']) }}"
+      loop: "{{ homelab_vms | dict2items }}"
+      changed_when: false
+
+# Agent VMs reach package mirrors only through this proxy, so it has to be up
+# before the next play upgrades them.
+- name: Configure the agents egress proxy first
+  hosts: egress01
+  gather_facts: true
+  become: true
+
+  vars_files:
+    - ../vars/vault.yml
+
+  roles:
+    - common
+    - egress_proxy
+
+- name: Configure homelab containers
+  hosts: homelab
+  gather_facts: true
+  become: true
+
+  vars_files:
+    - ../vars/vault.yml
+
+  roles:
+    - common
+
+  tasks:
+    - name: Apply service-specific roles
+      ansible.builtin.include_role:
+        name: "{{ item }}"
+      loop: "{{ homelab_roles }}"
+      when: item != "common"
+
+- name: Configure Proxmox host
+  hosts: proxmox_hosts
+  become: true
+
+  vars_files:
+    - ../vars/containers.yml
+    - ../vars/vms.yml
+
+  roles:
+    - node_exporter
+    # Before pve_host: its backup job writes to the PBS storage this role creates.
+    - pbs
+    - pve_host

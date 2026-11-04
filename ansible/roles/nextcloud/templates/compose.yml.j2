@@ -1,0 +1,68 @@
+# Managed by Ansible (role nextcloud).
+name: nextcloud
+
+services:
+  db:
+    image: {{ nextcloud_postgres_image }}
+    restart: unless-stopped
+    mem_limit: 384m
+    logging: &local-logging
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    env_file:
+      - db.env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nextcloud -d nextcloud"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Cache and file locking only; nothing to persist.
+  redis:
+    image: {{ nextcloud_redis_image }}
+    restart: unless-stopped
+    mem_limit: 128m
+    logging: *local-logging
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  app:
+    image: {{ nextcloud_image }}
+    restart: unless-stopped
+    mem_limit: 1g
+    logging: *local-logging
+    ports:
+      - "{{ nextcloud_host }}:{{ nextcloud_port }}:80"
+    volumes:
+      - html:/var/www/html
+      - {{ nextcloud_data_dir }}:/var/www/html/data
+    env_file:
+      - app.env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # Runs cron.php every 5 minutes (background jobs set to "cron" by Ansible).
+  cron:
+    image: {{ nextcloud_image }}
+    restart: unless-stopped
+    mem_limit: 512m
+    logging: *local-logging
+    entrypoint: /cron.sh
+    volumes:
+      - html:/var/www/html
+      - {{ nextcloud_data_dir }}:/var/www/html/data
+    env_file:
+      - app.env
+    depends_on:
+      - app
+
+volumes:
+  db-data:
+  html:

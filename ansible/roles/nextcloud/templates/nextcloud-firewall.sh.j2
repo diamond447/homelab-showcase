@@ -1,0 +1,21 @@
+#!/bin/sh
+# Restricts LAN access to the Docker-published Nextcloud port on nextcloud01.
+# Managed by Ansible (role nextcloud). Replaces its own chain atomically on
+# every run, so removed sources do not leave stale rules behind.
+set -eu
+
+CHAIN="{{ nextcloud_firewall_chain }}"
+
+# Declaring the chain in --noflush mode replaces its rules in one transaction.
+iptables-restore -w --noflush <<RULES
+*filter
+:$CHAIN - [0:0]
+-A $CHAIN -i {{ nextcloud_firewall_interface }} -p tcp -s {{ edge01_host }} -m conntrack --ctdir ORIGINAL --ctorigdstport {{ nextcloud_port }} -j RETURN
+-A $CHAIN -i {{ nextcloud_firewall_interface }} -p tcp -s {{ monitor_host }} -m conntrack --ctdir ORIGINAL --ctorigdstport {{ nextcloud_port }} -j RETURN
+-A $CHAIN -i {{ nextcloud_firewall_interface }} -p tcp -m conntrack --ctdir ORIGINAL --ctorigdstport {{ nextcloud_port }} -j DROP
+COMMIT
+RULES
+
+# Docker creates DOCKER-USER and jumps to it from FORWARD for published ports.
+iptables -w -N DOCKER-USER 2>/dev/null || true
+iptables -w -C DOCKER-USER -j "$CHAIN" 2>/dev/null || iptables -w -I DOCKER-USER -j "$CHAIN"

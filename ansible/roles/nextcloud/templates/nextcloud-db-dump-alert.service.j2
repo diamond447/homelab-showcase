@@ -1,0 +1,7 @@
+[Unit]
+Description=Alert through ntfy that the Nextcloud database dump failed
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/nextcloud-db-dump-alert.env
+ExecStart=/usr/bin/curl -fsS -m 20 -H "Title: nextcloud01 database dump failed" -H "Priority: 4" -H "Tags: floppy_disk,warning" -H "Authorization: Bearer ${NTFY_TOKEN}" -d "Nightly database dump on nextcloud01 failed. journalctl -u nextcloud-db-dump" ${NTFY_URL}

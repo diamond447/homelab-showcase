@@ -1,0 +1,12 @@
+---
+# Reports a change on purpose: a handler only notifies the next one when it
+# changed, so changed_when: false here would silently skip the restart.
+- name: Validate sshd configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: true
+  notify: Restart SSH
+
+- name: Restart SSH
+  ansible.builtin.service:
+    name: ssh
+    state: restarted

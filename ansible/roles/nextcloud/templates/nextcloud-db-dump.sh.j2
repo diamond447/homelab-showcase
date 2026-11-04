@@ -1,0 +1,25 @@
+#!/bin/bash
+# Nightly dump of the Nextcloud database next to the user files (mount point
+# mp0), together with the database roles and config.php (instance secrets and
+# the database login), so that volume alone is enough to rebuild the instance.
+# Managed by Ansible (role nextcloud).
+set -euo pipefail
+umask 077
+
+dir="{{ nextcloud_dump_dir }}"
+stamp=$(date +%F)
+compose=(docker compose -f {{ nextcloud_dir }}/compose.yml)
+trap 'rm -f "$dir"/*.tmp' EXIT
+
+"${compose[@]}" exec -T db pg_dumpall -U nextcloud --globals-only > "$dir/globals-$stamp.sql.tmp"
+"${compose[@]}" exec -T db pg_dump -U nextcloud -d nextcloud --format=custom > "$dir/nextcloud-$stamp.dump.tmp"
+"${compose[@]}" exec -T app cat /var/www/html/config/config.php > "$dir/config-$stamp.php.tmp"
+for name in globals-$stamp.sql nextcloud-$stamp.dump config-$stamp.php; do
+  mv "$dir/$name.tmp" "$dir/$name"
+done
+
+# Keep the newest {{ nextcloud_dump_keep }} of each kind.
+for kind in "globals-*.sql" "nextcloud-*.dump" "config-*.php"; do
+  # shellcheck disable=SC2086
+  ls -1t "$dir"/$kind | tail -n +{{ nextcloud_dump_keep + 1 }} | xargs -r rm --
+done

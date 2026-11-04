@@ -1,0 +1,20 @@
+// Managed by Ansible (role homepage), {{ homepage_variant }} dashboard.
+// Footer with the signed-in user. The apps01 proxy answers /_homelab/whoami
+// from the Authentik headers that edge sets: "username\ngroup1|group2".
+(async () => {
+  try {
+    const response = await fetch("/_homelab/whoami", { cache: "no-store" });
+    if (!response.ok) return;
+    const [user, groups = ""] = (await response.text()).split("\n");
+    const footer = document.createElement("div");
+    footer.id = "homelab-whoami";
+    const names = groups.split("|").filter(Boolean).join(", ") || "žádná";
+    footer.textContent = `Přihlášen: ${user || "?"} · Skupiny: ${names}`;
+    // Above Homepage's own footer (theme/refresh buttons), else at the end.
+    const pageFooter = document.getElementById("footer");
+    if (pageFooter) pageFooter.before(footer);
+    else document.body.appendChild(footer);
+  } catch {
+    // The footer is informational only.
+  }
+})();

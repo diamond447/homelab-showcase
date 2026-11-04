@@ -1,0 +1,41 @@
+# Managed by Ansible (role ntfy). Self-hosted ntfy for every homelab notification.
+base-url: "https://{{ ntfy_domain }}"
+listen-http: ":8080"
+cache-file: /var/cache/ntfy/cache.db
+cache-duration: "24h"
+auth-file: /var/lib/ntfy/user.db
+# Nothing is readable or writable without an account or token.
+auth-default-access: deny-all
+# Declarative accounts, reapplied on every start: the owner reads every topic from the
+# phone, each publisher gets one write-only token for its own topic.
+auth-users:
+  - "{{ ntfy_owner_user }}:{{ vault_ntfy_owner_password_hash }}:admin"
+  - "alerts:{{ vault_ntfy_publisher_password_hash }}:user"
+  - "health:{{ vault_ntfy_publisher_password_hash }}:user"
+{% if vault_ntfy_nextcloud_token is defined %}
+  - "nextcloud:{{ vault_ntfy_publisher_password_hash }}:user"
+{% endif %}
+auth-access:
+  - "alerts:{{ vault_ntfy_topic }}:wo"
+  - "health:{{ vault_health_ntfy_topic }}:wo"
+{% if vault_ntfy_nextcloud_token is defined %}
+  # Failures only, so it shares the homelab alerts topic.
+  - "nextcloud:{{ vault_ntfy_topic }}:wo"
+{% endif %}
+auth-tokens:
+  - "alerts:{{ vault_ntfy_alerts_token }}:alertmanager"
+  - "health:{{ vault_ntfy_health_token }}:health01"
+{% if vault_ntfy_nextcloud_token is defined %}
+  - "nextcloud:{{ vault_ntfy_nextcloud_token }}:nextcloud01"
+{% endif %}
+enable-login: true
+require-login: true
+enable-signup: false
+enable-reservations: false
+# edge01 sets X-Real-IP to the client address (from Cloudflare); rate limits use it.
+behind-proxy: true
+proxy-forwarded-header: "X-Real-IP"
+# iOS gets instant pushes only through APNs, which only ntfy.sh can send. With an
+# upstream, ntfy.sh receives a poll request (message ID and a hash of the topic),
+# never the message itself; the app then fetches the message from this server.
+upstream-base-url: "https://ntfy.sh"

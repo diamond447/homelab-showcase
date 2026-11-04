@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent01</title>
+<style>
+  /* Must match the iframe container (scheme-light in Homepage), or the
+     browser paints an opaque background behind this page. */
+  :root { color-scheme: light; }
+  html, body { margin: 0; background: transparent; }
+  body {
+    font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+    color: rgb(226 232 240);
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 6px 4px; box-sizing: border-box; min-height: 100vh;
+  }
+  .state { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: rgb(100 116 139); flex: none; }
+  .dot.running { background: rgb(34 197 94); }
+  .dot.stopped { background: rgb(239 68 68); }
+  .dot.hibernated { background: rgb(59 130 246); }
+  #detail { color: rgb(148 163 184); font-size: 12px; }
+  button {
+    font: inherit; color: inherit; cursor: pointer;
+    background: rgb(51 65 85); border: 1px solid rgb(71 85 105);
+    border-radius: 6px; padding: 4px 12px;
+  }
+  button:hover:not(:disabled) { background: rgb(71 85 105); }
+  button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+  <div class="state">
+    <span id="dot" class="dot"></span>
+    <div>
+      <div id="status">Načítám…</div>
+      <div id="detail"></div>
+    </div>
+  </div>
+  <button id="action" disabled></button>
+<script>
+const statusEl = document.getElementById("status");
+const detailEl = document.getElementById("detail");
+const dotEl = document.getElementById("dot");
+const button = document.getElementById("action");
+let pending = null;
+let pendingSince = 0;
+
+function uptime(seconds) {
+  const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+}
+
+// Shows the HTTP status instead of a JSON parse error when something in front
+// of homepage-api (Cloudflare, edge, Authentik) answers with an HTML page.
+async function call(path, options) {
+  const response = await fetch(path, options);
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`HTTP ${response.status} ${response.statusText} (${response.headers.get("content-type") || "?"})`);
+  }
+}
+
+async function refresh() {
+  try {
+    const vm = await call("status", { cache: "no-store" });
+    if (!vm.ok) throw new Error(vm.message);
+    // Proxmox locks the VM as "suspending" while it writes the memory to disk
+    // and as "suspended" once it is hibernated; a start resumes it.
+    const running = vm.status === "running" && vm.lock !== "suspending";
+    const hibernated = vm.lock === "suspended";
+    if (vm.lock === "suspending" && !pending) {
+      pending = "stopped";
+      pendingSince = Date.now();
+    }
+    dotEl.className = "dot " + (running ? "running" : hibernated ? "hibernated" : "stopped");
+    // Give up waiting after 5 minutes; writing the memory to disk takes a while.
+    if (pending && Date.now() - pendingSince > 300000) pending = null;
+    if (pending && (pending !== vm.status || vm.lock === "suspending")) {
+      statusEl.textContent = pending === "running" ? "Startuje…" : "Uspává se…";
+    } else {
+      pending = null;
+      statusEl.textContent = running ? "Běží" : hibernated ? "Uspáno" : "Vypnuto";
+    }
+    detailEl.textContent = running ? `uptime ${uptime(vm.uptime)}` : "";
+    button.textContent = running ? "Uspat" : hibernated ? "Probudit" : "Zapnout";
+    button.dataset.action = running ? "hibernate" : "start";
+    button.disabled = pending !== null;
+  } catch (error) {
+    dotEl.className = "dot";
+    statusEl.textContent = "Nedostupné";
+    detailEl.textContent = String(error.message || error);
+    button.disabled = true;
+  }
+}
+
+button.addEventListener("click", async () => {
+  const action = button.dataset.action;
+  if (action === "hibernate" && !confirm("Uspat agent01? Stav se uloží na disk a po probuzení bude pokračovat tam, kde skončil.")) return;
+  button.disabled = true;
+  let failure = null;
+  try {
+    const result = await call(action, { method: "POST", headers: { "X-Homelab-Action": action } });
+    if (!result.ok) throw new Error(result.message);
+    pending = action === "start" ? "running" : "stopped";
+    pendingSince = Date.now();
+  } catch (error) {
+    failure = error;
+  }
+  await refresh();
+  if (failure) detailEl.textContent = String(failure.message || failure);
+});
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

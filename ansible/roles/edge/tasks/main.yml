@@ -1,0 +1,108 @@
+---
+- name: Install packages required for repositories
+  ansible.builtin.apt:
+    name:
+      - curl
+      - gnupg2
+      - ca-certificates
+      - lsb-release
+      - debian-archive-keyring
+    state: present
+    update_cache: true
+
+- name: Ensure nginx keyring directory exists
+  ansible.builtin.file:
+    path: /usr/share/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Download nginx signing key  # noqa: command-instead-of-module (piped into gpg --dearmor)
+  ansible.builtin.shell:
+    cmd: >
+      set -o pipefail &&
+      curl -fsSL https://nginx.org/keys/nginx_signing.key
+      | gpg --dearmor
+      | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
+    executable: /bin/bash
+  args:
+    creates: /usr/share/keyrings/nginx-archive-keyring.gpg
+
+- name: Add nginx repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/nginx.list
+    mode: "0644"
+    content: |
+      deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/debian {{ ansible_distribution_release }} nginx
+
+- name: Add nginx APT pinning
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/99nginx
+    mode: "0644"
+    content: |
+      Package: *
+      Pin: origin nginx.org
+      Pin: release o=nginx
+      Pin-Priority: 900
+
+- name: Install nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+
+- name: Deploy homelab nginx config
+  ansible.builtin.template:
+    src: homelab.conf.j2
+    dest: /etc/nginx/conf.d/homelab.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Validate nginx configuration
+
+- name: Disable nginx default config if present
+  ansible.builtin.command:
+    cmd: mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.disabled
+  args:
+    creates: /etc/nginx/conf.d/default.conf.disabled
+    removes: /etc/nginx/conf.d/default.conf
+  notify: Validate nginx configuration
+
+- name: Ensure nginx is enabled and running
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: Download Cloudflare signing key  # noqa: command-instead-of-module (one-shot, guarded by creates)
+  ansible.builtin.shell:
+    cmd: >
+      curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg
+      > /usr/share/keyrings/cloudflare-main.gpg
+  args:
+    creates: /usr/share/keyrings/cloudflare-main.gpg
+
+- name: Add cloudflared repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/cloudflared.list
+    mode: "0644"
+    content: |
+      deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main
+
+- name: Install cloudflared
+  ansible.builtin.apt:
+    name: cloudflared
+    state: present
+    update_cache: true
+
+- name: Install cloudflared tunnel service
+  ansible.builtin.command:
+    cmd: cloudflared service install {{ cloudflare_tunnel_token }}
+    creates: /etc/systemd/system/cloudflared.service
+  no_log: true
+
+- name: Ensure cloudflared is enabled and running
+  ansible.builtin.systemd:
+    name: cloudflared
+    state: started
+    enabled: true
+    daemon_reload: true

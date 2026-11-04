@@ -1,0 +1,10 @@
+# Example allowlist of the agents egress proxy (the real one is not published).
+# Each entry covers its subdomains.
+anthropic.com
+claude.ai
+github.com
+githubusercontent.com
+pypi.org
+pythonhosted.org
+registry.npmjs.org
+deb.debian.org

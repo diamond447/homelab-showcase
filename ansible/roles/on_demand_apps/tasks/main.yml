@@ -1,0 +1,181 @@
+---
+- name: Create apps01 application directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /opt/apps/on-demand
+    - /opt/apps/on-demand/build
+    - /opt/apps/on-demand/nginx
+
+# homepage-api connects the wasm proxy to the homepage role's API service.
+- name: Create shared Docker networks
+  community.docker.docker_network:
+    name: "{{ item }}"
+    driver: bridge
+    internal: "{{ item in ['docker-api', 'homepage-api'] }}"
+    state: present
+  loop:
+    - apps-net
+    - docker-api
+    - homepage-api
+
+- name: Download pinned WasmX archive
+  ansible.builtin.get_url:
+    url: "https://github.com/Kong/ngx_wasm_module/releases/download/prerelease-0.6.0/{{ wasmx_archive }}"
+    dest: /opt/apps/on-demand/build/wasmx.tar.gz
+    checksum: "sha256:{{ wasmx_archive_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+    # GitHub release downloads sometimes stall past the 10 s default.
+    timeout: 120
+  register: on_demand_apps_wasmx_archive_download
+  until: on_demand_apps_wasmx_archive_download is succeeded
+  retries: 3
+  delay: 10
+
+- name: Download pinned Sablier Proxy-Wasm plugin
+  ansible.builtin.get_url:
+    url: "https://github.com/sablierapp/sablier-proxywasm-plugin/releases/download/{{ proxy_wasm_plugin_version }}/sablier-proxywasm-plugin.wasm"
+    dest: /opt/apps/on-demand/build/sablier-proxywasm-plugin.wasm
+    checksum: "sha256:{{ proxy_wasm_plugin_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+    # GitHub release downloads sometimes stall past the 10 s default.
+    timeout: 120
+  register: on_demand_apps_wasm_plugin_download
+  until: on_demand_apps_wasm_plugin_download is succeeded
+  retries: 3
+  delay: 10
+
+- name: Extract pinned WasmX NGINX binary
+  ansible.builtin.unarchive:
+    src: /opt/apps/on-demand/build/wasmx.tar.gz
+    dest: /opt/apps/on-demand/build
+    remote_src: true
+    creates: /opt/apps/on-demand/build/wasmx-prerelease-0.6.0-v8-x86_64-ubuntu22.04/nginx
+
+- name: Install verified NGINX Wasm binary in build context
+  ansible.builtin.copy:
+    src: /opt/apps/on-demand/build/wasmx-prerelease-0.6.0-v8-x86_64-ubuntu22.04/nginx
+    dest: /opt/apps/on-demand/build/nginx
+    remote_src: true
+    mode: "0755"
+
+- name: Deploy reproducible NGINX Wasm image build recipe
+  ansible.builtin.copy:
+    src: files/Dockerfile.wasm
+    dest: /opt/apps/on-demand/build/Dockerfile
+    owner: root
+    group: root
+    mode: "0644"
+  register: on_demand_apps_wasm_dockerfile
+
+- name: Deploy Sablier and Docker socket proxy Compose project
+  ansible.builtin.template:
+    src: sablier.compose.yml.j2
+    dest: /opt/apps/on-demand/sablier.compose.yml
+    owner: root
+    group: root
+    mode: "0644"
+  register: on_demand_apps_sablier_compose
+
+- name: Deploy Actual Budget OIDC environment
+  ansible.builtin.template:
+    src: actual.env.j2
+    dest: /opt/apps/on-demand/actual.env
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Deploy on-demand application Compose project
+  ansible.builtin.template:
+    src: apps.compose.yml.j2
+    dest: /opt/apps/on-demand/apps.compose.yml
+    owner: root
+    group: root
+    mode: "0644"
+  register: on_demand_apps_apps_compose
+
+- name: Deploy NGINX Proxy-Wasm configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: /opt/apps/on-demand/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: on_demand_apps_wasm_config
+
+- name: Copy NGINX configuration into the local image build context
+  ansible.builtin.copy:
+    src: /opt/apps/on-demand/nginx/nginx.conf
+    dest: /opt/apps/on-demand/build/nginx.conf
+    remote_src: true
+    mode: "0644"
+  register: on_demand_apps_wasm_build_config
+
+- name: Build custom NGINX Proxy-Wasm image from checksum-verified local files
+  community.docker.docker_image:
+    name: homelab/nginx-wasm:0.6.0-v1.1.0
+    source: build
+    force_source: >-
+      {{ on_demand_apps_wasm_dockerfile.changed or
+         on_demand_apps_wasm_build_config.changed or
+         on_demand_apps_wasm_plugin_download.changed or
+         on_demand_apps_wasmx_archive_download.changed }}
+    build:
+      path: /opt/apps/on-demand/build
+      pull: true
+      args:
+        UBUNTU_IMAGE: "{{ wasm_base_image }}"
+  register: on_demand_apps_wasm_image
+
+- name: Pull on-demand application images without starting containers
+  ansible.builtin.command:
+    cmd: docker compose -f /opt/apps/on-demand/apps.compose.yml pull
+  changed_when: false
+
+- name: Create on-demand application containers in stopped state
+  ansible.builtin.command:
+    cmd: docker compose -f /opt/apps/on-demand/apps.compose.yml create
+  changed_when: false
+
+- name: Start internal Sablier and NGINX Proxy-Wasm services
+  community.docker.docker_compose_v2:
+    project_src: /opt/apps/on-demand
+    files:
+      - sablier.compose.yml
+    pull: missing
+    state: present
+    wait: true
+    wait_timeout: 120
+  register: on_demand_apps_on_demand_infra
+
+- name: Restart NGINX Proxy-Wasm after config or image changes
+  community.docker.docker_compose_v2:
+    project_src: /opt/apps/on-demand
+    files:
+      - sablier.compose.yml
+    state: restarted
+    services:
+      - wasm-proxy
+  when: >-
+    on_demand_apps_wasm_config.changed or
+    on_demand_apps_wasm_build_config.changed or
+    on_demand_apps_wasm_image.changed or
+    on_demand_apps_wasm_dockerfile.changed
+
+- name: Wait for healthy NGINX Proxy-Wasm and Sablier after applying the config
+  community.docker.docker_compose_v2:
+    project_src: /opt/apps/on-demand
+    files:
+      - sablier.compose.yml
+    state: present
+    wait: true
+    wait_timeout: 120

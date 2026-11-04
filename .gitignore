@@ -1,0 +1,10 @@
+.env
+*.env
+*.key
+*.pem
+secrets/
+*.vault-password
+docs/bootstrap.md
+.vscode/settings.json
+__pycache__/
+*.pyc

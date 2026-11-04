@@ -1,0 +1,14 @@
+[Unit]
+Description=Restrict LAN access to Docker-published health coach and fit ports
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ health_coach_firewall_script_path }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target docker.service

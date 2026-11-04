@@ -1,0 +1,35 @@
+---
+agent_host_user: agent
+agent_host_home: "/home/{{ agent_host_user }}"
+agent_host_workspace: "{{ agent_host_home }}/projects"
+
+# The VM itself is the sandbox, so the agent may administer it.
+agent_host_passwordless_sudo: true
+
+# Keys Ansible enforces in ~/.claude/settings.json; the rest of the file is
+# left to Claude Code (plugins, /config, extra permission rules).
+agent_host_claude_settings:
+  permissions:
+    defaultMode: bypassPermissions
+  skipDangerousModePermissionPrompt: true
+  statusLine:
+    type: command
+    command: "bash {{ agent_host_home }}/.claude/statusline-command.sh"
+
+agent_host_git_name: "homelab-agent"
+agent_host_git_email: "agent@{{ inventory_hostname }}.invalid"
+
+agent_host_packages:
+  - acl
+  - build-essential
+  - git
+  - jq
+  - nodejs
+  - npm
+  - python3-pip
+  - python3-venv
+  - qemu-guest-agent
+  - ripgrep
+  - systemd-timesyncd
+  - tmux
+  - unzip

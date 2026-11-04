@@ -1,0 +1,309 @@
+#!/bin/bash
+# agentnet: show which hosts the agents zone tried to reach through the egress
+# proxy and toggle the allowlist. Managed by Ansible, do not edit on the host.
+#
+#   agentnet                  interactive table, pick numbers to toggle
+#   agentnet list [--json]    hosts with status, allowed/denied hits, last seen
+#   agentnet allow <domain>   allow the domain and all its subdomains
+#   agentnet deny <domain>    remove a domain from the allowlist
+#   agentnet events <host> [n] recent connections to one host, with reasons
+#                             (use "-" for connections without a host name)
+#   agentnet tail             follow proxy decisions live
+#   agentnet --api            SSH forced command for agentnet-web
+
+set -u
+
+ALLOWLIST="{{ egress_proxy_allowlist }}"
+LOG_DIR=/var/log/nginx
+AGENTS_NET="{{ agents_network_prefix }}."
+PROTECTED="{{ egress_proxy_protected_domains | join(' ') }}"
+LOCK=/run/agentnet.lock
+
+die() {
+	echo "agentnet: $*" >&2
+	exit 1
+}
+
+allowed_domains() {
+	sed -n 's/^\.\([^ ]*\) 1;$/\1/p' "$ALLOWLIST"
+}
+
+normalize_domain() {
+	echo "$1" | tr 'A-Z' 'a-z' | sed 's/^\*\.//; s/^\.//; s/\.$//'
+}
+
+is_valid_domain() {
+	echo "$1" | grep -Eq '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$'
+}
+
+# Entries cover subdomains, so allowing a parent of a protected name would
+# allow the protected name as well.
+is_protected() {
+	local p
+	for p in $PROTECTED; do
+		[ "$1" = "$p" ] && return 0
+		case "$p" in *".$1") return 0 ;; esac
+	done
+	return 1
+}
+
+# Rewrites the allowlist from stdin (one domain per line) and reloads nginx,
+# restoring the previous list if nginx rejects the result or reload fails.
+write_allowlist() {
+	local tmp
+	tmp=$(mktemp "$ALLOWLIST.XXXXXX")
+	{
+		echo "# Managed with agentnet on $(hostname). One \".domain 1;\" per line;"
+		echo "# the leading dot makes nginx match the domain and all its subdomains."
+		sort -u | sed '/^$/d; s/^/./; s/$/ 1;/'
+	} >"$tmp"
+	chmod 0644 "$tmp"
+	cp -p "$ALLOWLIST" "$ALLOWLIST.bak"
+	mv "$tmp" "$ALLOWLIST"
+	if ! nginx -t -q 2>/dev/null; then
+		mv "$ALLOWLIST.bak" "$ALLOWLIST"
+		die "nginx rejected the new allowlist, kept the old one"
+	fi
+	if ! systemctl reload nginx >/dev/null 2>&1; then
+		mv "$ALLOWLIST.bak" "$ALLOWLIST"
+		systemctl reload nginx >/dev/null 2>&1 || true
+		die "nginx reload failed"
+	fi
+}
+
+cmd_allow() {
+	local d new_list
+	d=$(normalize_domain "$1")
+	is_valid_domain "$d" || die "invalid domain: $1"
+	is_protected "$d" && die "$d is protected and cannot be allowed"
+	exec 9>"$LOCK"
+	flock 9
+	if allowed_domains | grep -qxF "$d"; then
+		echo "$d already allowed"
+		return 0
+	fi
+	new_list=$(allowed_domains; echo "$d")
+	write_allowlist <<< "$new_list"
+	logger -t agentnet "allowed $d${AGENTNET_USER:+ by $AGENTNET_USER}"
+	echo "$d allowed"
+}
+
+cmd_deny() {
+	local d new_list
+	d=$(normalize_domain "$1")
+	is_valid_domain "$d" || die "invalid domain: $1"
+	exec 9>"$LOCK"
+	flock 9
+	if ! allowed_domains | grep -qxF "$d"; then
+		echo "$d not in allowlist"
+		return 0
+	fi
+	# Open connections finish; new ones are denied after the reload.
+	new_list=$(allowed_domains | grep -vxF "$d" || true)
+	write_allowlist <<< "$new_list"
+	logger -t agentnet "denied $d${AGENTNET_USER:+ by $AGENTNET_USER}"
+	echo "$d denied"
+}
+
+# Log line fields (older lines stop after the sixth):
+#  1 time  2 tls|http  3 host or "-"  4 allowlist verdict 0|1  5 client  6 status
+#  7 TLS version or "-"  8 bytes in  9 bytes out  10 seconds  11 method  12 uri
+#  13+ upstream address(es)
+AWK_LIB='
+function host_of(   d) {
+	d = tolower($3)
+	if (d == "-" || d == "") return "-"
+	return (d ~ /^[a-z0-9._:-]+$/) ? d : ""
+}
+function label_of(d) {
+	return (d == "-") ? "(no host name)" : d
+}
+function reason_of() {
+	if (index($5, net) != 1) return "source " $5 " is outside the agents network"
+	if ($3 == "-" || $3 == "") {
+		if ($2 == "tls" && NF >= 7 && $7 == "-") return "not TLS: plain traffic on port 443"
+		if ($2 == "tls") return "TLS without a host name (URL with an IP address or encrypted ClientHello)"
+		return "HTTP request without a Host header"
+	}
+	if ($4 != "1") return "not on the allowlist"
+	if ($6 == "502" || $6 == "504") return "allowed, but the destination was unreachable (DNS or connect failed)"
+	if ($6 == "499") return "allowed, the client gave up before the destination answered"
+	if ($6 == "200" || $6 ~ /^[1-3][0-9][0-9]$/) return "allowed"
+	return "allowed, finished with status " $6
+}
+function when(t) { return substr(t, 6, 5) " " substr(t, 12, 8) }
+'
+
+log_lines() {
+	cat "$LOG_DIR"/agents-tls.log.1 "$LOG_DIR"/agents-http.log.1 \
+		"$LOG_DIR"/agents-tls.log "$LOG_DIR"/agents-http.log 2>/dev/null
+}
+
+# Prints: status<TAB>host<TAB>allowed hits<TAB>denied hits<TAB>last seen<TAB>last reason<TAB>clients<TAB>sortkey
+# status reflects the current allowlist, the hit counts what the proxy decided.
+report() {
+	{
+		allowed_domains | sed 's/^/ALLOW /'
+		log_lines
+	} | awk -v net="$AGENTS_NET" "$AWK_LIB"'
+	BEGIN { OFS = "\t" }
+	function is_allowed(d,   a) {
+		for (a in allow) if (d == a || substr(d, length(d) - length(a)) == "." a) return 1
+		return 0
+	}
+	$1 == "ALLOW" { allow[$2] = 1; next }
+	NF >= 6 {
+		d = host_of(); if (d == "") next
+		if ($4 == "1" && index($5, net) == 1) ok[d]++; else bad[d]++
+		if (!(d in last) || $1 >= last[d]) { last[d] = $1; why[d] = reason_of() }
+		if (!((d, $5) in seenclient)) { seenclient[d, $5] = 1; clients[d] = clients[d] (clients[d] == "" ? "" : ",") $5 }
+	}
+	END {
+		for (a in allow) if (!(a in last)) { last[a] = ""; why[a] = "no traffic yet" }
+		for (d in last) {
+			label = (last[d] == "") ? "-" : when(last[d])
+			st = (d != "-" && is_allowed(d)) ? "allowed" : "blocked"
+			print st, label_of(d), ok[d] + 0, bad[d] + 0, label, why[d], clients[d], last[d]
+		}
+	}' | sort -t "$(printf '\t')" -k8,8r
+}
+
+format_table() {
+	printf '%-3s %-8s %-40s %7s %6s  %-14s  %s\n' '#' STATUS HOST ALLOWED DENIED 'LAST SEEN' 'LAST DECISION'
+	awk -F '\t' '{
+		st = ($1 == "blocked") ? "BLOCKED" : "allowed"
+		printf "%-3d %-8s %-40s %7d %6d  %-14s  %s\n", NR, st, $2, $3, $4, $5, $6
+	}'
+}
+
+cmd_list() {
+	if [ "${1:-}" = "--json" ]; then
+		report | awk -F '\t' '
+		BEGIN { printf "{\"ok\":true,\"entries\":[" }
+		{
+			printf "%s{\"status\":\"%s\",\"domain\":\"%s\",\"allowed\":%d,\"denied\":%d,\"last_seen\":\"%s\",\"reason\":\"%s\",\"clients\":\"%s\"}",
+				(NR > 1 ? "," : ""), $1, $2, $3, $4, $5, $6, $7
+		}
+		END { print "]}" }'
+		return
+	fi
+	report | format_table
+}
+
+# Recent log lines for one host, newest first.
+cmd_events() {
+	local host="$1" n="${2:-20}" json="${3:-}"
+	case "$host" in
+		"(no host name)") host="-" ;;
+		-) ;;
+		*) host=$(normalize_domain "$host"); is_valid_domain "$host" || die "invalid host: $1" ;;
+	esac
+	case "$n" in *[!0-9]*|"") die "count must be a number" ;; esac
+	log_lines | sort -s -k1,1 | awk -v net="$AGENTS_NET" -v want="$host" -v json="$json" -v n="$n" "$AWK_LIB"'
+	NF >= 6 && host_of() == want {
+		i++
+		t[i] = when($1); c[i] = $5; v[i] = ($4 == "1" && index($5, net) == 1) ? "allowed" : "denied"
+		r[i] = reason_of(); proto[i] = $2 (NF >= 7 && $7 != "-" ? " " $7 : "")
+		inb[i] = (NF >= 8) ? $8 : "?"; outb[i] = (NF >= 9) ? $9 : "?"; dur[i] = (NF >= 10) ? $10 : "?"
+		req[i] = (NF >= 12 && $11 != "-") ? $11 " " $12 : ""
+		up[i] = ""; for (k = 13; k <= NF; k++) up[i] = up[i] (k > 13 ? " " : "") $k
+		if (up[i] == "-") up[i] = ""
+	}
+	function esc(x) { gsub(/[\\"]/, "", x); return x }
+	END {
+		first = (i > n) ? i - n + 1 : 1
+		if (json == "--json") {
+			printf "{\"ok\":true,\"events\":["
+			for (k = i; k >= first; k--)
+				printf "%s{\"time\":\"%s\",\"client\":\"%s\",\"verdict\":\"%s\",\"reason\":\"%s\",\"protocol\":\"%s\",\"bytes_in\":\"%s\",\"bytes_out\":\"%s\",\"seconds\":\"%s\",\"request\":\"%s\",\"upstream\":\"%s\"}",
+					(k < i ? "," : ""), t[k], c[k], v[k], esc(r[k]), proto[k], inb[k], outb[k], dur[k], esc(req[k]), esc(up[k])
+			print "]}"
+			exit
+		}
+		if (i == 0) { print "no connections to " want " in the current logs"; exit }
+		for (k = i; k >= first; k--) {
+			printf "%s  %-13s %-8s %-10s in %s B, out %s B, %ss\n", t[k], c[k], v[k], proto[k], inb[k], outb[k], dur[k]
+			printf "    %s\n", r[k]
+			if (req[k] != "") printf "    %s\n", req[k]
+			if (up[k] != "") printf "    upstream %s\n", up[k]
+		}
+	}'
+}
+
+cmd_interactive() {
+	local rows picks n row st d
+	rows=$(report)
+	[ -n "$rows" ] || { echo "no traffic and empty allowlist"; return; }
+	# Number from the same snapshot the user picks from.
+	echo "$rows" | format_table
+	printf '\nToggle # (space separated, empty to quit): '
+	read -r picks
+	for n in $picks; do
+		row=$(echo "$rows" | sed -n "${n}p")
+		[ -n "$row" ] || { echo "#$n: no such row"; continue; }
+		st=$(echo "$row" | cut -f1)
+		d=$(echo "$row" | cut -f2)
+		case "$d" in "(no "*)
+			echo "#$n: the client sent no host name, nothing to allow (see: agentnet events -)"
+			continue ;;
+		esac
+		if [ "$st" = "allowed" ]; then
+			# The row may be a subdomain of an allowlist entry.
+			if allowed_domains | grep -qxF "$d"; then
+				(cmd_deny "$d")
+			else
+				echo "#$n: $d is allowed through a parent domain, deny that instead"
+			fi
+		else
+			(cmd_allow "$d")
+		fi
+	done
+}
+
+cmd_tail() {
+	tail -n 0 -F "$LOG_DIR"/agents-tls.log "$LOG_DIR"/agents-http.log 2>/dev/null |
+		awk -v net="$AGENTS_NET" "$AWK_LIB"'NF >= 6 { print when($1), $5, $2, label_of(host_of()) ": " reason_of(); fflush() }'
+}
+
+# Commands that already print JSON; errors are wrapped like json_result does.
+json_or_error() {
+	local out
+	if out=$("$@" 2>&1); then
+		echo "$out"
+	else
+		out=$(echo "$out" | tr -d '\\"' | tr '\n' ' ' | sed 's/ *$//')
+		printf '{"ok":false,"message":"%s"}\n' "$out"
+	fi
+}
+
+json_result() {
+	local out ok
+	if out=$("$@" 2>&1); then ok=true; else ok=false; fi
+	out=$(echo "$out" | tr -d '\\"' | tr '\n' ' ' | sed 's/ *$//')
+	printf '{"ok":%s,"message":"%s"}\n' "$ok" "$out"
+}
+
+# Only these commands are reachable through the web app's SSH key.
+cmd_api() {
+	set -f
+	# shellcheck disable=SC2086
+	set -- ${SSH_ORIGINAL_COMMAND:-}
+	case "${1:-}" in
+		list) cmd_list --json ;;
+		events) json_or_error cmd_events "${2:-}" 20 --json ;;
+		allow) AGENTNET_USER="${3:-}" json_result cmd_allow "${2:-}" ;;
+		deny) AGENTNET_USER="${3:-}" json_result cmd_deny "${2:-}" ;;
+		*) echo '{"ok":false,"message":"unsupported command"}' ;;
+	esac
+}
+
+case "${1:-}" in
+	"") cmd_interactive ;;
+	list) cmd_list "${2:-}" ;;
+	allow) [ -n "${2:-}" ] || die "usage: agentnet allow <domain>"; cmd_allow "$2" ;;
+	deny) [ -n "${2:-}" ] || die "usage: agentnet deny <domain>"; cmd_deny "$2" ;;
+	events) [ -n "${2:-}" ] || die "usage: agentnet events <host> [count]"; cmd_events "$2" "${3:-20}" "${4:-}" ;;
+	tail) cmd_tail ;;
+	--api) cmd_api ;;
+	*) die "unknown command: $1" ;;
+esac

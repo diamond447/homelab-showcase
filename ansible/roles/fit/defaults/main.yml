@@ -1,0 +1,6 @@
+---
+# Default configurations for fit role (openGym tracker + Fit MCP server)
+# Pinned openGym images. Keep fit_opengym_version (group_vars) on the same release:
+# the MCP server and the worker read the exercise catalogue of that version.
+fit_opengym_api_image: "ghcr.io/duartesantos8/opengym-api:1.4.1@sha256:4bc07fe7d1f05a57c0fa25da3563d54dfe27223506637d67fc64088a2a2f140b"
+fit_opengym_web_image: "ghcr.io/duartesantos8/opengym-web:1.4.1@sha256:e32cae9d2f4aad0c5e1b7888c9bfc712b2306ddfe3c65bc4cfefd4b0002e86d3"

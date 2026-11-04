@@ -1,0 +1,74 @@
+---
+- name: Create Uptime Kuma directory
+  ansible.builtin.file:
+    path: /opt/monitoring/uptime-kuma
+    state: directory
+    owner: root
+    group: docker
+    mode: "0775"
+
+- name: Deploy Uptime Kuma compose
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: /opt/monitoring/uptime-kuma/compose.yml
+    owner: root
+    group: docker
+    mode: "0644"
+
+- name: Start Uptime Kuma
+  community.docker.docker_compose_v2:
+    project_src: /opt/monitoring/uptime-kuma
+    state: present
+    pull: missing
+
+- name: Wait for Uptime Kuma to be ready
+  ansible.builtin.wait_for:
+    host: "{{ uptime_kuma_host }}"
+    port: "{{ uptime_kuma_port }}"
+    delay: 2
+    timeout: 60
+
+- name: Install Uptime Kuma monitor sync dependencies
+  ansible.builtin.apt:
+    name:
+      - python3
+      - python3-socketio
+      - python3-requests
+      - python3-websocket
+    state: present
+
+- name: Deploy Uptime Kuma monitor sync script
+  ansible.builtin.copy:
+    src: sync_monitors.py
+    dest: /opt/monitoring/uptime-kuma/sync_monitors.py
+    owner: root
+    group: docker
+    mode: "0755"
+
+- name: Render Uptime Kuma desired monitors
+  ansible.builtin.template:
+    src: monitors.json.j2
+    dest: /opt/monitoring/uptime-kuma/monitors.json
+    owner: root
+    group: docker
+    mode: "0644"
+
+- name: Sync Uptime Kuma monitors
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_python_interpreter | default('/usr/bin/python3') }}"
+      - /opt/monitoring/uptime-kuma/sync_monitors.py
+      - /opt/monitoring/uptime-kuma/monitors.json
+  environment:
+    UPTIME_KUMA_URL: "http://{{ uptime_kuma_host }}:{{ uptime_kuma_port }}"
+    UPTIME_KUMA_USERNAME: "{{ vault_uptime_kuma_username }}"
+    UPTIME_KUMA_PASSWORD: "{{ vault_uptime_kuma_password }}"
+  register: uptime_kuma_sync
+  changed_when: "'Changed: true' in uptime_kuma_sync.stdout"
+  # Hides the credentials passed in the environment.
+  no_log: true
+
+# The sync output holds no secrets; show what was added or skipped.
+- name: Show Uptime Kuma monitor sync result
+  ansible.builtin.debug:
+    var: uptime_kuma_sync.stdout_lines

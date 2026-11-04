@@ -1,0 +1,9 @@
+{{ {
+  'origin': 'https://' ~ homepage_domain,
+  'admin_group': 'homelab admins',
+  'prometheus_url': 'http://' ~ monitor_host ~ ':' ~ prometheus_port,
+  'pve_url': 'https://' ~ pve_host ~ ':8006',
+  'agent_vmid': homepage_agent_vmid | int,
+  'agent_state_storage': homepage_agent_state_storage,
+  'queries': homepage_api_queries,
+} | to_nice_json }}

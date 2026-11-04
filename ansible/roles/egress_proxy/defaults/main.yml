@@ -1,0 +1,74 @@
+---
+# Host names the agents zone may reach over HTTP(S). Each entry also covers all
+# of its subdomains, so "debian.org" allows deb.debian.org and security.debian.org.
+# This list only seeds a fresh proxy: afterwards the live list on egress01 is the
+# source of truth (change it with agentnet) and every configure.yml run saves it
+# to the snapshot file, which then seeds any rebuild.
+egress_proxy_allowed_domains:
+  # Claude Code: API, subscription login, Remote Control, installer
+  - anthropic.com
+  - claude.ai
+  - claude.com
+  - claudeusercontent.com
+  # Antigravity CLI (agy) and Google sign-in. Only the Google APIs agy uses
+  # with a consumer AI Pro login; storage.googleapis.com serves its downloads.
+  - antigravity.google
+  - antigravity.google.com
+  - antigravity-unleash.goog
+  - antigravity-cli-auto-updater-974169037036.us-central1.run.app
+  - accounts.google.com
+  - cloudcode-pa.googleapis.com
+  - daily-cloudcode-pa.googleapis.com
+  - oauth2.googleapis.com
+  - storage.googleapis.com
+  - www.googleapis.com
+  # Git hosting: codeload is under github.com, release downloads and ghcr.io
+  # layers come from these githubusercontent hosts
+  - github.com
+  - raw.githubusercontent.com
+  - objects.githubusercontent.com
+  - release-assets.githubusercontent.com
+  - pkg-containers.githubusercontent.com
+  - ghcr.io
+  # Package registries. apt may connect to the SRV target of deb.debian.org.
+  - debian.org
+  - debian.map.fastly.net
+  - npmjs.org
+  - pypi.org
+  - pythonhosted.org
+  - docker.com
+  - docker.io
+
+# Names agents may never be allowed to reach, nor any parent domain of them.
+egress_proxy_protected_domains:
+  - "{{ agentnet_domain }}"
+
+# Changes enforced on the live allowlist on every run, to roll out a change of
+# the defaults without resetting what was added with agentnet. Entries here win
+# over agentnet, so keep them to what the agents cannot work without.
+egress_proxy_ensure_allowed:
+  - cloudcode-pa.googleapis.com
+  - daily-cloudcode-pa.googleapis.com
+  - oauth2.googleapis.com
+  - storage.googleapis.com
+  - www.googleapis.com
+  - raw.githubusercontent.com
+  - objects.githubusercontent.com
+  - release-assets.githubusercontent.com
+  - pkg-containers.githubusercontent.com
+egress_proxy_ensure_blocked:
+  # Too broad: any GCS bucket, Google API or GitHub user content
+  - googleapis.com
+  - githubusercontent.com
+  # Tailscale would tunnel past the proxy over its DERP relays
+  - tailscale.com
+  - tailscale.io
+
+# Every name the agents zone looks up resolves to this address and nothing is
+# forwarded upstream, so DNS cannot carry data out. Web traffic to it is
+# redirected to nginx, which resolves the real name from SNI / Host.
+egress_proxy_sinkhole_ip: 198.18.0.1
+
+egress_proxy_reset_allowlist: false
+egress_proxy_allowlist_snapshot: "{{ playbook_dir }}/../files/agents-allowlist.txt"
+egress_proxy_allowlist: /etc/nginx/agents-allowlist.conf

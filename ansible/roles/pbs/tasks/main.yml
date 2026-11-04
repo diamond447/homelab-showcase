@@ -1,0 +1,171 @@
+---
+- name: Add the Proxmox Backup Server repository
+  ansible.builtin.deb822_repository:
+    name: pbs
+    types:
+      - deb
+    uris:
+      - http://download.proxmox.com/debian/pbs
+    suites:
+      - "{{ ansible_distribution_release }}"
+    components:
+      - pbs-no-subscription
+    signed_by: /usr/share/keyrings/proxmox-archive-keyring.gpg
+
+# The package ships this repository enabled, and it answers 401 without a
+# subscription, which breaks every later apt update. Written before the install,
+# so dpkg keeps this version of the file (the apt module keeps old conffiles).
+- name: Disable the PBS enterprise repository
+  ansible.builtin.deb822_repository:
+    name: pbs-enterprise
+    types:
+      - deb
+    uris:
+      - https://enterprise.proxmox.com/debian/pbs
+    suites:
+      - "{{ ansible_distribution_release }}"
+    components:
+      - pbs-enterprise
+    signed_by: /usr/share/keyrings/proxmox-archive-keyring.gpg
+    enabled: false
+
+- name: Install Proxmox Backup Server
+  ansible.builtin.apt:
+    name: proxmox-backup-server
+    state: present
+    update_cache: true
+
+- name: Read PBS datastores
+  ansible.builtin.command: proxmox-backup-manager datastore list --output-format json
+  register: pbs_datastores
+  changed_when: false
+
+# PBS creates the directory (and its parents) itself and owns it as `backup`.
+- name: Create the PBS datastore
+  ansible.builtin.command:
+    argv: [proxmox-backup-manager, datastore, create, "{{ pbs_datastore }}", "{{ pbs_datastore_path }}"]
+  when: pbs_datastore not in (pbs_datastores.stdout | from_json | map(attribute='name'))
+  changed_when: true
+
+- name: Read the PBS datastore settings
+  ansible.builtin.command: proxmox-backup-manager datastore show {{ pbs_datastore }} --output-format json
+  register: pbs_datastore_settings
+  changed_when: false
+
+- name: Schedule garbage collection
+  ansible.builtin.command:
+    argv: [proxmox-backup-manager, datastore, update, "{{ pbs_datastore }}", --gc-schedule, "{{ pbs_gc_schedule }}"]
+  when: (pbs_datastore_settings.stdout | from_json)['gc-schedule'] | default('') != pbs_gc_schedule
+  changed_when: true
+
+- name: Read PBS prune jobs
+  ansible.builtin.command: proxmox-backup-manager prune-job list --output-format json
+  register: pbs_prune_jobs
+  changed_when: false
+
+- name: Configure the prune job
+  vars:
+    pbs_prune_current: >-
+      {{ pbs_prune_jobs.stdout | from_json | selectattr('id', 'equalto', pbs_datastore ~ '-keep-last')
+         | list | first | default({}) }}
+  ansible.builtin.command:
+    argv: >-
+      {{ ['proxmox-backup-manager', 'prune-job']
+         + (['update', pbs_datastore ~ '-keep-last'] if pbs_prune_current
+            else ['create', pbs_datastore ~ '-keep-last', '--store', pbs_datastore])
+         + ['--schedule', pbs_prune_schedule, '--keep-last', pbs_keep_last | string] }}
+  when: >-
+    not pbs_prune_current
+    or pbs_prune_current.schedule | default('') != pbs_prune_schedule
+    or pbs_prune_current['keep-last'] | default(0) | int != pbs_keep_last
+  changed_when: true
+
+- name: Read PBS users
+  ansible.builtin.command: proxmox-backup-manager user list --output-format json
+  register: pbs_users
+  changed_when: false
+
+- name: Create PBS users
+  ansible.builtin.command:
+    argv: [proxmox-backup-manager, user, create, "{{ item }}"]
+  loop:
+    - "{{ pbs_pve_user }}"
+    - "{{ pbs_reader_user }}"
+  when: item not in (pbs_users.stdout | from_json | map(attribute='userid'))
+  changed_when: true
+
+# A token can only use what both it and its user are granted. The users get their
+# role here; the PVE token gets it below, right after it is created (PBS refuses ACLs
+# for tokens that do not exist yet).
+- name: Grant datastore roles
+  ansible.builtin.command:
+    argv: [proxmox-backup-manager, acl, update, "/datastore/{{ pbs_datastore }}", "{{ item.role }}", --auth-id, "{{ item.auth_id }}"]
+  loop:
+    - { auth_id: "{{ pbs_pve_user }}", role: DatastoreBackup }
+    - { auth_id: "{{ pbs_reader_user }}", role: DatastoreReader }
+  changed_when: false
+
+- name: Read PVE storages
+  ansible.builtin.command: pvesh get /storage --output-format json
+  register: pbs_pve_storages
+  changed_when: false
+
+# The token secret is shown only once, so the token is (re)created together with
+# the PVE storage and lives only in PVE's storage config (/etc/pve/priv).
+- name: Connect PVE to the datastore
+  when: pbs_pve_storage not in (pbs_pve_storages.stdout | from_json | map(attribute='storage'))
+  block:
+    - name: Remove a token left over from an earlier attempt
+      ansible.builtin.command:
+        argv: [proxmox-backup-manager, user, delete-token, "{{ pbs_pve_user }}", "{{ pbs_pve_token_name }}"]
+      register: pbs_token_delete
+      failed_when: false
+      changed_when: pbs_token_delete.rc == 0
+
+    # Prints `Result: {"tokenid": ..., "value": ...}`; generate-token has no --output-format.
+    - name: Create the PVE API token
+      ansible.builtin.command:
+        argv: [proxmox-backup-manager, user, generate-token, "{{ pbs_pve_user }}", "{{ pbs_pve_token_name }}"]
+      register: pbs_pve_token
+      changed_when: true
+      no_log: true
+
+    - name: Grant the datastore role to the new token
+      ansible.builtin.command:
+        argv: [proxmox-backup-manager, acl, update, "/datastore/{{ pbs_datastore }}", DatastoreBackup, --auth-id, "{{ pbs_pve_user }}!{{ pbs_pve_token_name }}"]
+      changed_when: true
+
+    - name: Read the PBS certificate fingerprint
+      ansible.builtin.shell: |
+        set -o pipefail
+        proxmox-backup-manager cert info | sed -n 's/^Fingerprint (sha256): *//p'
+      args:
+        executable: /bin/bash
+      register: pbs_fingerprint
+      changed_when: false
+      failed_when: pbs_fingerprint.stdout is not match('^([0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}$')
+
+    - name: Add the PBS storage to PVE
+      ansible.builtin.command:
+        argv:
+          - pvesm
+          - add
+          - pbs
+          - "{{ pbs_pve_storage }}"
+          - --server
+          - 127.0.0.1
+          - --datastore
+          - "{{ pbs_datastore }}"
+          - --username
+          - "{{ pbs_pve_user }}!{{ pbs_pve_token_name }}"
+          - --password
+          - "{{ (pbs_pve_token.stdout | regex_replace('^\\s*Result:\\s*', '') | from_json).value }}"
+          - --fingerprint
+          - "{{ pbs_fingerprint.stdout }}"
+          - --content
+          - backup
+          # Pruning is done by the PBS prune job.
+          - --prune-backups
+          - keep-all=1
+      no_log: true
+      changed_when: true

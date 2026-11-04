@@ -1,0 +1,36 @@
+services:
+  ntfy:
+    image: {{ ntfy_image }}
+    container_name: ntfy
+    restart: unless-stopped
+    command: [serve]
+    user: "{{ ntfy_uid }}:{{ ntfy_uid }}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    environment:
+      TZ: "{{ timezone }}"
+      # Go does not see the cgroup limit; collect garbage before mem_limit is reached.
+      GOMEMLIMIT: 48MiB
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "{{ monitor_host }}:{{ ntfy_port }}:8080"
+    volumes:
+      - ./server.yml:/etc/ntfy/server.yml:ro
+      - ./cache:/var/cache/ntfy
+      - ./lib:/var/lib/ntfy
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 http://127.0.0.1:8080/v1/health -O - | grep -Eq '\"healthy\" *: *true'"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

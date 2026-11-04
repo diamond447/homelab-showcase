@@ -1,0 +1,260 @@
+---
+- name: Install unattended security upgrades
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+
+- name: Configure unattended security upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52homelab-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      #clear Unattended-Upgrade::Allowed-Origins;
+      #clear Unattended-Upgrade::Origins-Pattern;
+      Unattended-Upgrade::Origins-Pattern {
+          "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+      };
+      Unattended-Upgrade::Automatic-Reboot "false";
+      # Leave autoremove (old kernels) to manual maintenance on the hypervisor.
+      Unattended-Upgrade::Remove-Unused-Dependencies "false";
+
+- name: Enable periodic package updates and unattended upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Deploy LXC fstrim script
+  ansible.builtin.copy:
+    dest: /usr/local/sbin/pve-lxc-fstrim
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/bin/bash
+      set -u
+
+      containers=$(pct list 2>/dev/null | awk 'NR>1 && $2=="running" {print $1}')
+      for ctid in $containers; do
+          echo "Running pct fstrim for LXC ${ctid}..."
+          if ! pct fstrim "${ctid}"; then
+              echo "Failed to fstrim LXC ${ctid}" >&2
+          fi
+      done
+
+- name: Deploy LXC fstrim systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/pve-lxc-fstrim.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Discard unused blocks on running LXC containers
+      Documentation=man:pct(1)
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/pve-lxc-fstrim
+
+- name: Deploy LXC fstrim systemd timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/pve-lxc-fstrim.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Weekly trim of running LXC container disks
+
+      [Timer]
+      OnCalendar=weekly
+      Persistent=true
+      RandomizedDelaySec=1h
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable and start LXC fstrim timer
+  ansible.builtin.systemd:
+    name: pve-lxc-fstrim.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Look up OpenWrt VM id
+  ansible.builtin.shell: |
+    set -o pipefail
+    qm list | awk -v name="{{ agents_openwrt_vm_name }}" '$2 == name { print $1 }'
+  args:
+    executable: /bin/bash
+  register: pve_host_openwrt_vmid
+  changed_when: false
+  failed_when: pve_host_openwrt_vmid.stdout | length == 0
+
+- name: Configure OpenWrt VM startup order
+  ansible.builtin.shell: |
+    set -euo pipefail
+    desired="order=1,up=30"
+    current=$(qm config {{ pve_host_openwrt_vmid.stdout }} | awk -F: '$1 ~ /^startup$/ { gsub(/[ \t]/, "", $2); print $2 }')
+    if [ "$current" = "$desired" ]; then
+      echo unchanged
+      exit 0
+    fi
+    qm set {{ pve_host_openwrt_vmid.stdout }} --startup "$desired"
+  args:
+    executable: /bin/bash
+  register: pve_host_openwrt_startup
+  changed_when: pve_host_openwrt_startup.stdout != "unchanged"
+
+- name: Configure LXC container startup order
+  ansible.builtin.shell: |
+    set -euo pipefail
+    desired="{{ item.value.startup | default('order=3') }}"
+    current=$(pct config {{ item.value.proxmox_id }} | awk -F: '$1 ~ /^startup$/ { gsub(/[ \t]/, "", $2); print $2 }')
+    if [ "$current" = "$desired" ]; then
+      echo unchanged
+      exit 0
+    fi
+    pct set {{ item.value.proxmox_id }} --startup "$desired"
+  args:
+    executable: /bin/bash
+  loop: "{{ homelab_containers | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: pve_host_lxc_startup
+  changed_when: pve_host_lxc_startup.stdout != "unchanged"
+
+- name: Configure VM startup order
+  ansible.builtin.shell: |
+    set -euo pipefail
+    desired="{{ item.value.startup | default('order=4') }}"
+    current=$(qm config {{ item.value.proxmox_id }} | awk -F: '$1 ~ /^startup$/ { gsub(/[ \t]/, "", $2); print $2 }')
+    if [ "$current" = "$desired" ]; then
+      echo unchanged
+      exit 0
+    fi
+    qm set {{ item.value.proxmox_id }} --startup "$desired"
+  args:
+    executable: /bin/bash
+  loop: "{{ homelab_vms | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: pve_host_vm_startup
+  changed_when: pve_host_vm_startup.stdout != "unchanged"
+
+- name: Ensure smartmontools package is present
+  ansible.builtin.apt:
+    name: smartmontools
+    state: present
+
+- name: Download smartctl_exporter
+  ansible.builtin.get_url:
+    url: >-
+      {{
+        'https://github.com/prometheus-community/smartctl_exporter/releases/download/v' ~
+        smartctl_exporter_version ~ '/smartctl_exporter-' ~
+        smartctl_exporter_version ~ '.linux-amd64.tar.gz'
+      }}
+    checksum: >-
+      sha256:https://github.com/prometheus-community/smartctl_exporter/releases/download/v{{ smartctl_exporter_version }}/sha256sums.txt
+    dest: /tmp/smartctl_exporter.tar.gz
+    mode: "0644"
+
+- name: Extract smartctl_exporter
+  ansible.builtin.unarchive:
+    src: /tmp/smartctl_exporter.tar.gz
+    dest: /tmp
+    remote_src: true
+    creates: "/tmp/smartctl_exporter-{{ smartctl_exporter_version }}.linux-amd64/smartctl_exporter"
+
+- name: Install smartctl_exporter binary
+  ansible.builtin.copy:
+    src: "/tmp/smartctl_exporter-{{ smartctl_exporter_version }}.linux-amd64/smartctl_exporter"
+    dest: /usr/local/bin/smartctl_exporter
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart smartctl_exporter
+
+- name: Install smartctl_exporter systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/smartctl_exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Prometheus smartctl_exporter
+      Wants=network-online.target
+      After=network-online.target
+
+      # Root is needed for raw access to the disks.
+      [Service]
+      User=root
+      Group=root
+      Type=simple
+      ExecStart=/usr/local/bin/smartctl_exporter --web.listen-address={{ pve_host }}:{{ smartctl_exporter_port }}
+      Restart=on-failure
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: Restart smartctl_exporter
+
+- name: Enable and start smartctl_exporter
+  ansible.builtin.systemd:
+    name: smartctl_exporter
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Read Proxmox backup jobs
+  ansible.builtin.command: pvesh get /cluster/backup --output-format json
+  register: pve_host_backup_jobs
+  changed_when: false
+
+- name: Configure nightly backup job
+  vars:
+    pve_host_backup_current: "{{ pve_host_backup_jobs.stdout | from_json | selectattr('id', 'equalto', pve_host_backup_job_id) | list | first | default({}) }}"
+    pve_host_backup_vmid_list: "{{ pve_host_backup_vmids | map('string') | join(',') }}"
+    # pvesh may return the list as an array or as one string.
+    pve_host_backup_current_excludes: >-
+      {{ (pve_host_backup_current['exclude-path'] | default([]))
+         if (pve_host_backup_current['exclude-path'] | default([])) is not string
+         else pve_host_backup_current['exclude-path'] | regex_findall('[^\s,]+') }}
+    # PBS compresses chunks itself, so the job has no compress setting.
+    pve_host_backup_delete: "{{ ['compress'] + ([] if pve_host_backup_exclude_paths else ['exclude-path']) }}"
+    pve_host_backup_target: >-
+      {{ ['set', '/cluster/backup/' ~ pve_host_backup_job_id, '--delete', pve_host_backup_delete | join(',')]
+         if pve_host_backup_current
+         else ['create', '/cluster/backup', '--id', pve_host_backup_job_id] }}
+  ansible.builtin.command:
+    argv: >-
+      {{ ['pvesh'] + pve_host_backup_target + [
+           '--schedule', pve_host_backup_schedule,
+           '--vmid', pve_host_backup_vmid_list,
+           '--storage', pve_host_backup_storage,
+           '--mode', 'snapshot',
+           '--prune-backups', pve_host_backup_prune,
+           '--enabled', '1']
+         + (['--exclude-path'] | product(pve_host_backup_exclude_paths) | flatten) }}
+  # pvesh may report prune-backups in another form than it was given; a needless
+  # `set` with the same values is harmless.
+  when: >-
+    not pve_host_backup_current
+    or pve_host_backup_current.schedule | default('') != pve_host_backup_schedule
+    or pve_host_backup_current.vmid | default('') | string != pve_host_backup_vmid_list
+    or pve_host_backup_current.storage | default('') != pve_host_backup_storage
+    or pve_host_backup_current['prune-backups'] | default('') | string != pve_host_backup_prune
+    or pve_host_backup_current.mode | default('') != 'snapshot'
+    or pve_host_backup_current.enabled | default(1) | int != 1
+    or pve_host_backup_current.compress is defined
+    or pve_host_backup_current_excludes | sort != pve_host_backup_exclude_paths | sort
+  changed_when: true

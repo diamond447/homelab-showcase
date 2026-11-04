@@ -1,0 +1,130 @@
+---
+- name: Install nginx with the stream module
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - libnginx-mod-stream
+    state: present
+    update_cache: true
+
+- name: Check for an existing allowlist
+  ansible.builtin.stat:
+    path: "{{ egress_proxy_allowlist }}"
+  register: egress_proxy_allowlist_stat
+
+# The live list on this host is the source of truth. Seed it only when it is
+# missing (new host) or on request, preferring the snapshot in the repository.
+- name: Seed the allowlist
+  ansible.builtin.template:
+    src: agents-allowlist.conf.j2
+    dest: "{{ egress_proxy_allowlist }}"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    egress_proxy_seed_domains: >-
+      {{
+        (lookup('ansible.builtin.file', egress_proxy_allowlist_snapshot).splitlines()
+          | map('trim') | reject('match', '^(#|$)') | list)
+        if egress_proxy_allowlist_snapshot is exists
+        else egress_proxy_allowed_domains
+      }}
+  when: not egress_proxy_allowlist_stat.stat.exists or egress_proxy_reset_allowlist | bool
+  notify: Validate nginx configuration
+
+- name: Enforce required allowlist entries
+  ansible.builtin.lineinfile:
+    path: "{{ egress_proxy_allowlist }}"
+    line: ".{{ item }} 1;"
+    state: present
+  loop: "{{ egress_proxy_ensure_allowed }}"
+  notify: Validate nginx configuration
+
+- name: Enforce removed allowlist entries
+  ansible.builtin.lineinfile:
+    path: "{{ egress_proxy_allowlist }}"
+    regexp: "^\\.{{ item | regex_escape }} 1;$"
+    state: absent
+  loop: "{{ egress_proxy_ensure_blocked }}"
+  notify: Validate nginx configuration
+
+- name: Deploy nginx configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Validate nginx configuration
+
+- name: Install dnsmasq
+  ansible.builtin.apt:
+    name: dnsmasq
+    state: present
+
+# Keeps the Debian packaging from pointing this host's own resolver at the
+# sinkhole; egress01 itself resolves through the router.
+- name: Keep dnsmasq out of the local resolver setup
+  ansible.builtin.lineinfile:
+    path: /etc/default/dnsmasq
+    regexp: "^#?DNSMASQ_EXCEPT="
+    line: 'DNSMASQ_EXCEPT="lo"'
+  notify: Restart dnsmasq
+
+- name: Deploy DNS sinkhole configuration
+  ansible.builtin.template:
+    src: dnsmasq-sinkhole.conf.j2
+    dest: /etc/dnsmasq.d/agents-sinkhole.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+
+- name: Ensure dnsmasq is enabled and running
+  ansible.builtin.service:
+    name: dnsmasq
+    state: started
+    enabled: true
+
+- name: Install agentnet
+  ansible.builtin.template:
+    src: agentnet.sh.j2
+    dest: /usr/local/sbin/agentnet
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure nginx is enabled and running
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: Apply nginx changes before reading the allowlist back
+  ansible.builtin.meta: flush_handlers
+
+- name: Read live allowlist
+  ansible.builtin.slurp:
+    src: "{{ egress_proxy_allowlist }}"
+  register: egress_proxy_live
+
+- name: Create snapshot directory
+  ansible.builtin.file:
+    path: "{{ egress_proxy_allowlist_snapshot | dirname }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+
+- name: Save allowlist snapshot to the repository
+  ansible.builtin.copy:
+    dest: "{{ egress_proxy_allowlist_snapshot }}"
+    mode: "0644"
+    content: |
+      # Live allowlist of the agents egress proxy, saved by configure.yml.
+      # Change it with agentnet on egress01, not here. Each entry covers its subdomains.
+      {% for domain in egress_proxy_live.content | b64decode | regex_findall('(?m)^\\.(\\S+) 1;$') | sort %}
+      {{ domain }}
+      {% endfor %}
+  delegate_to: localhost
+  become: false

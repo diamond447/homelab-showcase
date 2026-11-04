@@ -1,0 +1,205 @@
+---
+# Two instances of the same image: `users` is a plain app launcher with no
+# secrets, `admins` adds the infrastructure widgets and gets the API tokens.
+# The apps01 NGINX proxy chooses one by the user's Authentik groups.
+# homepage-api (files/api) formats the pve01 resources and starts/hibernates the
+# agent VM for the admin dashboard.
+
+- name: Create Homepage project directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ homepage_dir }}"
+    - "{{ homepage_dir }}/api"
+    - "{{ homepage_dir }}/api/config"
+
+- name: Create Homepage config directories
+  ansible.builtin.file:
+    path: "{{ homepage_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ homepage_uid }}"
+    group: "{{ homepage_gid }}"
+    mode: "0750"
+  loop:
+    - users
+    - admins
+
+# The public status page sits at the root of the Kuma domain, either through
+# the page's own domain mapping or as Kuma's entry page.
+- name: Look up the Uptime Kuma status page served at the root
+  ansible.builtin.uri:
+    url: "http://{{ uptime_kuma_host }}:{{ uptime_kuma_port }}/api/entry-page"
+    headers:
+      Host: "{{ uptime_kuma_domain }}"
+      X-Forwarded-Host: "{{ uptime_kuma_domain }}"
+    return_content: true
+  register: homepage_kuma_entry_page
+  when: not homepage_uptime_kuma_slug
+
+- name: Pick the Uptime Kuma status page slug
+  when: not homepage_uptime_kuma_slug
+  vars:
+    entry: "{{ homepage_kuma_entry_page.json }}"
+  block:
+    - name: Check that Kuma serves a status page at the root
+      ansible.builtin.assert:
+        that: >-
+          entry.type == 'statusPageMatchedDomain' or
+          (entry.entryPage | default('')).startswith('statusPage-')
+        fail_msg: >-
+          https://{{ uptime_kuma_domain }}/ is not a status page (Kuma returned
+          {{ entry | to_json }}). Set homepage_uptime_kuma_slug instead.
+        quiet: true
+
+    - name: Use the slug of that status page
+      ansible.builtin.set_fact:
+        homepage_uptime_kuma_slug: >-
+          {{ entry.statusPageSlug
+             if entry.type == 'statusPageMatchedDomain'
+             else entry.entryPage | regex_replace('^statusPage-', '') }}
+
+- name: Deploy Homepage config files
+  ansible.builtin.template:
+    src: "config/{{ item.1 }}.j2"
+    dest: "{{ homepage_dir }}/{{ item.0 }}/{{ item.1 }}"
+    owner: "{{ homepage_uid }}"
+    group: "{{ homepage_gid }}"
+    mode: "0640"
+  loop: "{{ ['users', 'admins'] | product(homepage_config_files) | list }}"
+  loop_control:
+    label: "{{ item.0 }}/{{ item.1 }}"
+  vars:
+    homepage_variant: "{{ item.0 }}"
+    # Homepage copies its sample file for any of these that is missing.
+    homepage_config_files:
+      - settings.yaml
+      - services.yaml
+      - widgets.yaml
+      - bookmarks.yaml
+      - docker.yaml
+      - kubernetes.yaml
+      - proxmox.yaml
+      - custom.css
+      - custom.js
+  register: homepage_config
+
+- name: Deploy Homepage admin secrets
+  ansible.builtin.template:
+    src: admins.env.j2
+    dest: "{{ homepage_dir }}/admins.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Deploy homepage-api sources
+  ansible.builtin.copy:
+    src: "api/{{ item }}"
+    dest: "{{ homepage_dir }}/api/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - Dockerfile
+    - app.py
+    - agent.html
+  register: homepage_api_sources
+
+- name: Read the Proxmox cluster CA
+  ansible.builtin.slurp:
+    src: /etc/pve/pve-root-ca.pem
+  register: homepage_pve_ca
+  delegate_to: pve01
+
+- name: Deploy homepage-api configuration
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ homepage_dir }}/api/config/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - name: config.json
+      content: "{{ lookup('ansible.builtin.template', 'api-config.json.j2') }}"
+    - name: pve-root-ca.pem
+      content: "{{ homepage_pve_ca.content | b64decode }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: homepage_api_config
+
+- name: Deploy homepage-api secrets
+  ansible.builtin.template:
+    src: api.env.j2
+    dest: "{{ homepage_dir }}/api.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Deploy Homepage Compose project
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ homepage_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Start Homepage
+  community.docker.docker_compose_v2:
+    project_src: "{{ homepage_dir }}"
+    files:
+      - compose.yml
+    pull: missing
+    build: "{{ 'always' if homepage_api_sources.changed else 'policy' }}"
+    state: present
+    wait: true
+    wait_timeout: 120
+
+# Settings are read when the page is built at startup, so pick up edits.
+- name: Restart Homepage after config changes  # noqa: no-handler (must run before the revalidate below)
+  community.docker.docker_compose_v2:
+    project_src: "{{ homepage_dir }}"
+    files:
+      - compose.yml
+    services:
+      - homepage-users
+      - homepage-admins
+    state: restarted
+    wait: true
+    wait_timeout: 120
+  when: homepage_config.changed
+
+- name: Restart homepage-api after config changes  # noqa: no-handler (must run before the revalidate below)
+  community.docker.docker_compose_v2:
+    project_src: "{{ homepage_dir }}"
+    files:
+      - compose.yml
+    services:
+      - homepage-api
+    state: restarted
+    wait: true
+    wait_timeout: 120
+  when: homepage_api_config.changed
+
+# The image ships "/" prerendered with the sample config, and Homepage only
+# regenerates it when a browser that saw an older config asks. Do it here so
+# a new browser gets the current layout too. Right after a restart the server
+# refuses connections for a moment, so retry.
+- name: Regenerate the Homepage start page from the current config
+  ansible.builtin.command:
+    cmd: >-
+      docker compose -f {{ homepage_dir }}/compose.yml exec -T {{ item }}
+      wget -qO- http://127.0.0.1:3000/api/revalidate
+  loop:
+    - homepage-users
+    - homepage-admins
+  register: homepage_revalidate
+  until: homepage_revalidate.rc == 0 and '"revalidated":true' in homepage_revalidate.stdout
+  retries: 10
+  delay: 3
+  changed_when: false
+  failed_when: homepage_revalidate.rc != 0 or '"revalidated":true' not in homepage_revalidate.stdout

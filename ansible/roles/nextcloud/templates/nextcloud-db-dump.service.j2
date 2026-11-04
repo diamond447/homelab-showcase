@@ -1,0 +1,9 @@
+[Unit]
+Description=Dump the Nextcloud database
+After=docker.service
+Requires=docker.service
+OnFailure=nextcloud-db-dump-alert.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nextcloud-db-dump

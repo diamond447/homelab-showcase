@@ -1,0 +1,14 @@
+---
+- name: Configure DHCP pool
+  ansible.builtin.raw: |
+    uci set dhcp.lan='dhcp'
+    uci set dhcp.lan.interface='lan'
+    uci set dhcp.lan.start='{{ homelab_dhcp_start }}'
+    uci set dhcp.lan.limit='{{ homelab_dhcp_limit }}'
+    uci set dhcp.lan.leasetime='{{ homelab_dhcp_leasetime }}'
+    uci commit dhcp
+  changed_when: false
+
+- name: Restart dnsmasq
+  ansible.builtin.raw: /etc/init.d/dnsmasq restart
+  changed_when: false

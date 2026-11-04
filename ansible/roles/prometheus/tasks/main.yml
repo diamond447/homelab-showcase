@@ -1,0 +1,41 @@
+---
+- name: Create Prometheus directory
+  ansible.builtin.file:
+    path: /opt/monitoring/prometheus
+    state: directory
+    owner: root
+    group: docker
+    mode: "0775"
+
+- name: Deploy Prometheus config
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /opt/monitoring/prometheus/prometheus.yml
+    owner: root
+    group: docker
+    mode: "0644"
+  notify: Restart Prometheus
+
+- name: Deploy Prometheus alert rules
+  ansible.builtin.copy:
+    src: alerts.yml
+    dest: /opt/monitoring/prometheus/alerts.yml
+    owner: root
+    group: docker
+    mode: "0644"
+  notify: Restart Prometheus
+
+- name: Deploy Prometheus compose
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: /opt/monitoring/prometheus/compose.yml
+    owner: root
+    group: docker
+    mode: "0644"
+  notify: Restart Prometheus
+
+- name: Start Prometheus
+  community.docker.docker_compose_v2:
+    project_src: /opt/monitoring/prometheus
+    state: present
+    pull: missing

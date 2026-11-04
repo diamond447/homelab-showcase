@@ -1,0 +1,86 @@
+# Managed by Ansible (role fit).
+services:
+  api:
+    image: {{ fit_opengym_api_image }}
+    restart: unless-stopped
+    mem_limit: 256m
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    env_file:
+      - opengym.env
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+      # Reachable only through the web container, which overwrites the forwarded headers.
+      TRUST_PROXY: "1"
+    volumes:
+      # users, passkeys, per-user state and session secret: backed up with the LXC
+      - ./data/opengym:/data
+    # The image checks every 5 minutes with no start period, so `up --wait` (Ansible
+    # wait: true) would block for 5 minutes before the first check.
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+
+  web:
+    image: {{ fit_opengym_web_image }}
+    restart: unless-stopped
+    mem_limit: 64m
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      NGINX_PORT: "8080"
+      BACKEND: api
+      PORT: "3000"
+      RESOLVER: 127.0.0.11
+      # edge01 overwrites CF-Connecting-IP with the real client address on /api/, so the
+      # sign-in throttle counts each client on its own instead of everyone as edge01.
+      CF_CONNECTING_IP: "$$http_cf_connecting_ip"
+    ports:
+      - "{{ health_coach_host }}:{{ fit_web_port }}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8080/ || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+
+  mcp:
+    image: {{ health_coach_image }}
+    restart: unless-stopped
+    mem_limit: 256m
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: ["fit-mcp"]
+    env_file:
+      - fit-mcp.env
+    depends_on:
+      web:
+        condition: service_started
+    volumes:
+      - ./data/fit-mcp:/data
+    ports:
+      - "{{ health_coach_host }}:{{ fit_mcp_port }}:8081"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

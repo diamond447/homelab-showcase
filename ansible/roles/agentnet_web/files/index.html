@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentnet</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1b1f24; --muted: #667085; --line: #e4e7ec;
+    --ok: #12805c; --ok-bg: #e7f6ef; --bad: #c4320a; --bad-bg: #fdeee8; --accent: #3056d3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #181b21; --text: #e6e8eb; --muted: #8b93a1; --line: #2a2f38;
+      --ok: #4ac18e; --ok-bg: #12291f; --bad: #ff8a65; --bad-bg: #331b14; --accent: #7c9cff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  #status { color: var(--muted); font-size: 13px; }
+  .bar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .chips { display: flex; gap: 6px; }
+  .chip { border: 1px solid var(--line); background: var(--card); color: var(--text);
+          border-radius: 999px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  .chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  form { display: flex; gap: 6px; flex: 1; min-width: 220px; }
+  input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+          background: var(--card); color: var(--text); font: inherit; }
+  button.act { border: 0; border-radius: 8px; padding: 8px 12px; font: inherit; font-weight: 600;
+               cursor: pointer; white-space: nowrap; }
+  .allow { background: var(--ok-bg); color: var(--ok); }
+  .deny { background: var(--bad-bg); color: var(--bad); }
+  ul { list-style: none; margin: 0; padding: 0; background: var(--card);
+       border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  li { padding: 10px 12px; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .info { cursor: pointer; }
+  .why { font-size: 12px; margin-top: 2px; }
+  .blockedwhy { color: var(--bad); }
+  .events { margin: 8px 0 2px 19px; font-size: 12px; display: grid; gap: 8px; }
+  .ev { border-left: 2px solid var(--line); padding-left: 8px; }
+  .ev.denied { border-color: var(--bad); } .ev.allowed { border-color: var(--ok); }
+  .ev code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.allowed { background: var(--ok); } .dot.blocked { background: var(--bad); }
+  .info { flex: 1; min-width: 0; }
+  .domain { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .empty { padding: 24px; text-align: center; color: var(--muted); }
+  #toast { position: fixed; left: 16px; right: 16px; bottom: 16px; max-width: 520px; margin: 0 auto;
+           padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg);
+           opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>agentnet</h1><span id="status">loading…</span></header>
+  <div class="bar">
+    <div class="chips" role="group" aria-label="Filter">
+      <button class="chip" data-filter="blocked" aria-pressed="true">Blocked</button>
+      <button class="chip" data-filter="allowed" aria-pressed="false">Allowed</button>
+      <button class="chip" data-filter="all" aria-pressed="false">All</button>
+    </div>
+    <form id="add">
+      <input id="domain" placeholder="example.com" autocapitalize="off" autocomplete="off" spellcheck="false">
+      <button class="act allow" type="submit">Allow</button>
+    </form>
+  </div>
+  <ul id="list"></ul>
+</main>
+<div id="toast" role="status"></div>
+<script>
+  const list = document.getElementById("list");
+  const statusEl = document.getElementById("status");
+  let filter = "blocked", entries = [], busy = false;
+  const expanded = new Set(), events = new Map();
+
+  function toast(msg) {
+    const t = document.getElementById("toast");
+    t.textContent = msg; t.classList.add("show");
+    clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("show"), 3000);
+  }
+
+  function isIp(d) { return d.startsWith("(no ") || /^[0-9.]+(:[0-9]+)?$/.test(d); }
+
+  function render() {
+    const shown = entries.filter(e => filter === "all" || e.status === filter);
+    list.replaceChildren();
+    if (!shown.length) {
+      const li = document.createElement("li");
+      li.className = "empty"; li.textContent = "Nothing here.";
+      list.append(li); return;
+    }
+    for (const e of shown) {
+      const li = document.createElement("li");
+      const dot = document.createElement("span");
+      dot.className = "dot " + e.status;
+      const info = document.createElement("div");
+      info.className = "info";
+      const name = document.createElement("div");
+      name.className = "domain"; name.textContent = e.domain;
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = `${e.allowed} allowed · ${e.denied} denied · ${e.last_seen}`
+        + (e.clients ? ` · from ${e.clients}` : "");
+      const why = document.createElement("div");
+      why.className = "why" + (e.status === "blocked" ? " blockedwhy" : "");
+      why.textContent = e.reason;
+      info.append(name, meta, why);
+      info.title = "Show recent connections";
+      info.onclick = () => toggle(e.domain);
+      const row = document.createElement("div");
+      row.className = "row";
+      row.append(dot, info);
+      li.append(row);
+      if (!isIp(e.domain)) {
+        const b = document.createElement("button");
+        const allow = e.status === "blocked";
+        b.className = "act " + (allow ? "allow" : "deny");
+        b.textContent = allow ? "Allow" : "Deny";
+        b.onclick = () => act(allow ? "allow" : "deny", e.domain);
+        row.append(b);
+      }
+      if (expanded.has(e.domain)) li.append(renderEvents(e.domain));
+      list.append(li);
+    }
+  }
+
+  function hostParam(d) { return d.startsWith("(no ") ? "-" : d; }
+
+  function renderEvents(domain) {
+    const box = document.createElement("div");
+    box.className = "events";
+    const evs = events.get(domain);
+    if (!evs) { box.textContent = "loading…"; return box; }
+    if (typeof evs === "string") { box.textContent = evs; return box; }
+    if (!evs.length) { box.textContent = "No connections in the current logs."; return box; }
+    for (const ev of evs) {
+      const d = document.createElement("div");
+      d.className = "ev " + ev.verdict;
+      const head = document.createElement("div");
+      head.textContent = `${ev.time} · ${ev.client} · ${ev.verdict} · ${ev.protocol}`;
+      const reason = document.createElement("div");
+      reason.textContent = ev.reason;
+      const size = document.createElement("div");
+      size.className = "meta";
+      size.textContent = `in ${ev.bytes_in} B · out ${ev.bytes_out} B · ${ev.seconds} s`;
+      d.append(head, reason, size);
+      for (const [label, value] of [["request", ev.request], ["upstream", ev.upstream]]) {
+        if (!value) continue;
+        const line = document.createElement("div");
+        const code = document.createElement("code");
+        code.textContent = value;
+        line.append(label + " ", code);
+        d.append(line);
+      }
+      box.append(d);
+    }
+    return box;
+  }
+
+  async function fetchEvents(domain) {
+    try {
+      const r = await fetch("/api/events?host=" + encodeURIComponent(hostParam(domain)), { cache: "no-store" });
+      const data = await r.json();
+      events.set(domain, data.ok ? data.events : (data.message || "failed"));
+    } catch (err) {
+      events.set(domain, "request failed: " + err.message);
+    }
+    render();
+  }
+
+  function toggle(domain) {
+    if (expanded.has(domain)) { expanded.delete(domain); render(); return; }
+    expanded.add(domain);
+    render();
+    fetchEvents(domain);
+  }
+
+  async function load() {
+    if (busy) return;
+    try {
+      const r = await fetch("/api/list", { cache: "no-store" });
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.message);
+      entries = data.entries;
+      statusEl.textContent = "updated " + new Date().toLocaleTimeString();
+      render();
+      for (const d of expanded) fetchEvents(d);
+    } catch (err) {
+      statusEl.textContent = "offline: " + err.message;
+    }
+  }
+
+  async function act(action, domain) {
+    busy = true;
+    try {
+      const r = await fetch("/api/" + action, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain }),
+      });
+      const data = await r.json();
+      toast(data.message || (data.ok ? "done" : "failed"));
+    } catch (err) {
+      toast("request failed: " + err.message);
+    } finally {
+      busy = false;
+      load();
+    }
+  }
+
+  document.querySelectorAll(".chip").forEach(c => c.onclick = () => {
+    filter = c.dataset.filter;
+    document.querySelectorAll(".chip").forEach(x => x.setAttribute("aria-pressed", x === c));
+    render();
+  });
+
+  document.getElementById("add").onsubmit = ev => {
+    ev.preventDefault();
+    const input = document.getElementById("domain");
+    const d = input.value.trim().toLowerCase();
+    if (d) { act("allow", d); input.value = ""; }
+  };
+
+  load();
+  setInterval(() => { if (!document.hidden) load(); }, 5000);
+</script>
+</body>
+</html>

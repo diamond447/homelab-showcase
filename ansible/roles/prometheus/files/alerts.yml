@@ -1,0 +1,68 @@
+groups:
+  - name: homelab
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Target {{ $labels.instance }} is down"
+
+      - alert: FilesystemAlmostFull
+        expr: >-
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"}
+          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"} * 100) < 15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} has less than 15% space available"
+
+      - alert: MemoryLow
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100) < 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host {{ $labels.instance }} has less than 10% memory available"
+
+      - alert: ThinPoolAlmostFull
+        expr: (pve_disk_usage_bytes{id=~"storage/.+/local-lvm"} / pve_disk_size_bytes{id=~"storage/.+/local-lvm"} * 100) > 80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LVM-Thin pool {{ $labels.id }} on {{ $labels.instance }} is over 80% full"
+
+      - alert: ThinPoolFull
+        expr: (pve_disk_usage_bytes{id=~"storage/.+/local-lvm"} / pve_disk_size_bytes{id=~"storage/.+/local-lvm"} * 100) > 90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LVM-Thin pool {{ $labels.id }} on {{ $labels.instance }} is over 90% full"
+
+      - alert: GuestDown
+        expr: pve_up{id=~"(lxc|qemu)/.+"} == 0 and on(id) pve_onboot_status == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Guest {{ $labels.id }} on {{ $labels.instance }} is down"
+
+      - alert: SmartFailed
+        expr: smartctl_device_smart_status != 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SMART status failed on {{ $labels.instance }}"
+
+      - alert: NvmeCriticalWarning
+        expr: smartctl_device_critical_warning > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NVMe critical warning on {{ $labels.instance }}"

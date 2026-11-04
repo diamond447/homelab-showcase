@@ -1,0 +1,15 @@
+{%- set all_monitors = [] -%}
+{%- for m in uptime_kuma_monitors -%}
+  {%- set _ = all_monitors.append(m) -%}
+{%- endfor -%}
+{%- for s in edge_services if (s.access | default('users')) in ['users', 'admins'] and s.name != 'uptime-kuma' and s.domain != uptime_kuma_domain -%}
+  {%- set prefix = s.domain.split('.')[0] -%}
+  {%- set _ = all_monitors.append({
+        'name': prefix ~ ' (auth gate)',
+        'type': 'http',
+        'url': 'https://' ~ s.domain ~ '/',
+        'maxredirects': 0,
+        'accepted_statuscodes': ['300-399']
+      }) -%}
+{%- endfor -%}
+{{ all_monitors | to_nice_json }}

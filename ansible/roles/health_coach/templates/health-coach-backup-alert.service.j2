@@ -1,0 +1,7 @@
+[Unit]
+Description=Alert through ntfy that the health database backup failed
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/health-coach-backup-alert.env
+ExecStart=/usr/bin/curl -fsS -m 20 -H "Title: health01 backup failed" -H "Priority: 4" -H "Tags: floppy_disk,warning" -H "Authorization: Bearer ${NTFY_TOKEN}" -d "Nightly pg_dump on health01 failed. journalctl -u health-coach-backup" ${NTFY_URL}

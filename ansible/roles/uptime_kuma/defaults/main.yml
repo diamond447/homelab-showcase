@@ -1,0 +1,103 @@
+---
+# Default monitoring parameters
+uptime_kuma_default_interval: 60
+uptime_kuma_default_retry_interval: 60
+uptime_kuma_default_maxretries: 2
+
+# Desired monitors list for Uptime Kuma (public and internal service monitors)
+uptime_kuma_monitors:
+  # Public (through Cloudflare -> edge)
+  - name: Authentik
+    type: http
+    url: "https://{{ authentik_domain }}/-/health/live/"
+
+  - name: Grafana
+    type: http
+    url: "https://{{ grafana_domain }}/api/health"
+
+  - name: Health coach MCP
+    type: http
+    url: "https://{{ health_coach_domain }}/healthz"
+
+  - name: openGym
+    type: http
+    url: "https://{{ fit_domain }}/api/health"
+
+  - name: Healthstats
+    type: http
+    url: "https://{{ healthstats_domain }}/healthz"
+
+  - name: Nextcloud
+    type: keyword
+    url: "https://{{ nextcloud_domain }}/status.php"
+    keyword: '"installed":true'
+
+  - name: ntfy
+    type: keyword
+    url: "https://{{ ntfy_domain }}/v1/health"
+    keyword: '"healthy":true'
+
+  # Internal (from monitor01)
+  - name: Proxmox
+    type: http
+    url: "https://{{ pve_host }}:8006"
+    ignoreTls: true
+
+  - name: OpenWrt
+    type: ping
+    hostname: "{{ homelab_gateway }}"
+
+  - name: OpenWrt DNS
+    type: dns
+    hostname: cloudflare.com
+    dns_resolve_server: "{{ homelab_gateway }}"
+    port: 53
+    dns_resolve_type: A
+
+  - name: Egress DNS sinkhole
+    type: dns
+    hostname: example.com
+    dns_resolve_server: "{{ agents_egress_host }}"
+    port: 53
+    dns_resolve_type: A
+    conditions:
+      - type: expression
+        variable: record
+        operator: equals
+        # Same as egress_proxy_sinkhole_ip in roles/egress_proxy/defaults/main.yml,
+        # which is not loaded on monitor01.
+        value: "{{ egress_proxy_sinkhole_ip | default('198.18.0.1') }}"
+        andOr: and
+
+  - name: Authentik (internal)
+    type: http
+    url: "http://{{ authentik_host }}:{{ authentik_port }}/-/health/live/"
+
+  - name: Prometheus
+    type: http
+    url: "http://{{ monitor_host }}:{{ prometheus_port }}/-/healthy"
+
+  - name: Alertmanager
+    type: http
+    url: "http://{{ monitor_host }}:{{ alertmanager_port }}/-/healthy"
+
+  - name: ntfy (internal)
+    type: keyword
+    url: "http://{{ monitor_host }}:{{ ntfy_port }}/v1/health"
+    keyword: '"healthy":true'
+
+  - name: Health coach MCP (internal)
+    type: http
+    url: "http://{{ health_coach_host }}:{{ health_coach_mcp_port }}/healthz"
+
+  - name: Fit MCP (internal)
+    type: http
+    url: "http://{{ health_coach_host }}:{{ fit_mcp_port }}/healthz"
+
+  - name: Healthstats (internal)
+    type: http
+    url: "http://{{ health_coach_host }}:{{ health_coach_web_port }}/healthz"
+
+  - name: agent01 node_exporter
+    type: http
+    url: "http://{{ agent_vm_host }}:9100/metrics"

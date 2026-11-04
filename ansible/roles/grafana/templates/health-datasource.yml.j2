@@ -1,0 +1,15 @@
+apiVersion: 1
+
+datasources:
+  - name: Health
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: "{{ health_coach_host }}:{{ health_coach_db_port }}"
+    user: grafana_ro
+    secureJsonData:
+      password: "{{ vault_health_coach_grafana_db_password }}"
+    jsonData:
+      database: health
+      sslmode: disable
+      postgresVersion: 1600
+    editable: false

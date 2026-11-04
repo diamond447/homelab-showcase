@@ -1,0 +1,35 @@
+#!/bin/sh
+# Keeps guests on {{ agents_bridge }} from reaching the Proxmox host directly; they
+# must go through OpenWrt. Managed by Ansible (role pve_vms), run from post-up.
+# Prints "changed" when it had to modify anything.
+set -eu
+
+BR="{{ agents_bridge }}"
+
+set_sysctl() {
+  if [ "$(sysctl -n "$1")" != "$2" ]; then
+    sysctl -q -w "$1=$2"
+    echo changed
+  fi
+}
+
+ensure_rule() {
+  ipt=$1
+  shift
+  if ! "$ipt" -w -C "$@" 2>/dev/null; then
+    "$ipt" -w -I "$@"
+    echo changed
+  fi
+}
+
+# No IPv6 link-local address and no ARP replies for the host's other addresses.
+set_sysctl "net.ipv6.conf.$BR.disable_ipv6" 1
+set_sysctl "net.ipv4.conf.$BR.arp_ignore" 8
+set_sysctl "net.ipv4.conf.$BR.arp_announce" 2
+
+for ipt in iptables ip6tables; do
+  # Nothing on the bridge may talk to the host itself...
+  ensure_rule "$ipt" INPUT -i "$BR" -j DROP
+  # ...or be routed by the host to another network. Bridged traffic stays on $BR.
+  ensure_rule "$ipt" FORWARD -i "$BR" ! -o "$BR" -j DROP
+done

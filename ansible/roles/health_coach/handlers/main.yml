@@ -1,0 +1,7 @@
+---
+- name: Restart Health Coach
+  community.docker.docker_compose_v2:
+    project_src: "{{ health_coach_dir }}"
+    pull: always
+    state: present
+    wait: true

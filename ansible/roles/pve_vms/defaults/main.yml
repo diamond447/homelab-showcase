@@ -1,0 +1,9 @@
+---
+pve_vms_storage: local-lvm
+pve_vms_image_dir: /var/lib/vz/import
+pve_vms_image_name: debian-13-genericcloud-amd64.qcow2
+pve_vms_image_url: "https://cloud.debian.org/images/cloud/trixie/latest/{{ pve_vms_image_name }}"
+pve_vms_image_checksum: "sha512:https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
+
+# Run from post-up on the agents bridge and by the role.
+pve_vms_isolation_script: /usr/local/sbin/agents-bridge-isolation

@@ -1,0 +1,121 @@
+events {}
+pid /tmp/nginx.pid;
+
+wasm {
+    module proxywasm_sablier_plugin /wasm/sablier-proxywasm-plugin.wasm;
+}
+
+error_log /dev/stderr info;
+
+http {
+    access_log /dev/stdout;
+    resolver 127.0.0.11 valid=5s ipv6=off;
+    # Same limit as edge01; without it nginx rejects bodies over 1 MiB with 413
+    # after edge has already accepted them (e.g. Actual budget uploads).
+    client_max_body_size 50m;
+
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+    }
+
+    # Edge always overwrites X-authentik-groups from the forward-auth response
+    # (pipe-separated group names), and only edge01 may connect here. Anything
+    # else, including a missing header, gets the users dashboard.
+    map $http_x_authentik_groups $homepage_upstream {
+        default homepage-users:3000;
+        "~(^|\|)homelab admins(\||$)" homepage-admins:3000;
+    }
+
+    map $http_x_authentik_groups $homepage_admin {
+        default "";
+        "~(^|\|)homelab admins(\||$)" 1;
+    }
+
+    server {
+        listen 8080;
+        server_name {{ homepage_domain }};
+        allow {{ edge01_host }};
+        deny all;
+
+        # Who is signed in, for the dashboard footer (custom.js). Plain text,
+        # because NGINX cannot escape the values for JSON.
+        location = /_homelab/whoami {
+            default_type text/plain;
+            add_header Cache-Control "private, no-store" always;
+            return 200 "$http_x_authentik_username\n$http_x_authentik_groups";
+        }
+
+        # Agent VM start/shutdown (homepage-api), admins only.
+        location ^~ /_homelab/agent/ {
+            if ($homepage_admin = "") {
+                return 404;
+            }
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            set $homepage_api_upstream homepage-api:8080;
+            proxy_pass http://$homepage_api_upstream;
+        }
+
+        # Build assets are identical in both instances (same image).
+        location ^~ /_next/static/ {
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_pass http://$homepage_upstream;
+        }
+
+        location / {
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            # Pages and API responses differ per group under the same URL,
+            # so no shared cache may store them.
+            proxy_hide_header Cache-Control;
+            add_header Cache-Control "private, no-store" always;
+            proxy_pass http://$homepage_upstream;
+        }
+    }
+
+{% for app in edge_services | selectattr('on_demand', 'defined') %}
+    server {
+        listen 8080;
+        server_name {{ app.domain }};
+        allow {{ edge01_host }};
+        deny all;
+
+        location / {
+            proxy_wasm proxywasm_sablier_plugin '{"sablier_url":"sablier:10000","group":"{{ app.name }}","session_duration":"15m","dynamic":{"display_name":"{{ app.on_demand.display_name }}","theme":"hacker-terminal"}}';
+            wasm_socket_read_timeout 60s;
+            set $upstream_host {{ app.on_demand.upstream }}$request_uri;
+            proxy_pass http://$upstream_host;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_read_timeout 3600s;
+        }
+    }
+
+{% endfor %}
+    server {
+        listen 8080 default_server;
+        server_name _;
+        allow {{ edge01_host }};
+        deny all;
+        return 404;
+    }
+}

@@ -1,0 +1,48 @@
+name: on-demand-apps
+
+services:
+{% for app in edge_services | selectattr('on_demand', 'defined') %}
+  {{ app.name }}:
+    image: {{ app.on_demand.image }}
+    restart: unless-stopped
+    labels:
+      sablier.enable: "true"
+      sablier.group: "{{ app.name }}"
+{% if app.name == 'actual' %}
+    environment:
+      TZ: {{ timezone }}
+    env_file:
+      - actual.env
+    volumes:
+      - actual-data:/data
+    # Sablier stops idle apps with docker stop; leave time to finish writes.
+    stop_grace_period: 30s
+{% endif %}
+    networks:
+      apps-net:
+        aliases:
+          - {{ app.name }}
+    healthcheck:
+      test: {{ app.on_demand.healthcheck }}
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    cpus: 1.0
+    mem_limit: {{ app.on_demand.memory_limit }}
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+{% endfor %}
+
+volumes:
+  actual-data:
+
+networks:
+  apps-net:
+    external: true

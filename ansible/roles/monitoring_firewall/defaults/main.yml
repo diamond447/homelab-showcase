@@ -1,0 +1,38 @@
+---
+# Network interface on monitor01 attached to the LAN
+monitoring_firewall_interface: "{{ ansible_default_ipv4.interface | default('eth0') }}"
+
+# Published ports reachable from the LAN only from the listed sources.
+# edge01 proxies them behind Authentik; the admin Homepage on apps01 reads
+# Prometheus for its widgets.
+monitoring_firewall_restricted_ports:
+  - port: "{{ prometheus_port }}"
+    sources:
+      - "{{ edge01_host }}"
+      - "{{ apps01_host }}"
+  # Grafana: edge01, and the Grafana widget of the admin Homepage on apps01.
+  - port: "{{ grafana_port }}"
+    sources:
+      - "{{ edge01_host }}"
+      - "{{ apps01_host }}"
+  - port: "{{ alertmanager_port }}"
+    sources:
+      - "{{ edge01_host }}"
+  - port: "{{ agentnet_port }}"
+    sources:
+      - "{{ edge01_host }}"
+  # ntfy: phones through edge01, the health worker and backup alert on health01,
+  # the database dump alert on nextcloud01. Alertmanager and Uptime Kuma run on
+  # monitor01 itself.
+  - port: "{{ ntfy_port }}"
+    sources:
+      - "{{ edge01_host }}"
+      - "{{ health_coach_host }}"
+      - "{{ nextcloud_host }}"
+
+# Published ports not reachable from the LAN at all (local containers still reach them)
+monitoring_firewall_dropped_ports:
+  - "{{ pve_exporter_port }}"
+
+monitoring_firewall_chain: MONITORING-FW
+monitoring_firewall_script_path: /usr/local/sbin/monitoring-firewall

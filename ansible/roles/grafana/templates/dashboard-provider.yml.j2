@@ -1,0 +1,24 @@
+apiVersion: 1
+
+providers:
+  - name: Homelab
+    orgId: 1
+    folder: Homelab
+    type: file
+    disableDeletion: true
+    editable: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+  # Health Coach dashboards, vendored from diamond447/health-coach grafana/ (see
+  # files/dashboards-health/README.md); separate directory so the Homelab provider does
+  # not load them twice.
+  - name: Health Coach
+    orgId: 1
+    folder: Health
+    type: file
+    disableDeletion: true
+    editable: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards-health

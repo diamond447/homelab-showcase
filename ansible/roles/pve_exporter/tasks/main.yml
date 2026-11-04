@@ -1,0 +1,33 @@
+---
+- name: Create PVE exporter directory
+  ansible.builtin.file:
+    path: /opt/monitoring/pve-exporter
+    state: directory
+    owner: root
+    group: docker
+    mode: "0775"
+
+- name: Deploy PVE exporter config
+  ansible.builtin.template:
+    src: pve.yml.j2
+    dest: /opt/monitoring/pve-exporter/pve.yml
+    owner: root
+    group: "101"
+    mode: "0640"
+  notify: Restart PVE exporter
+  no_log: true
+
+- name: Deploy PVE exporter compose
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: /opt/monitoring/pve-exporter/compose.yml
+    owner: root
+    group: docker
+    mode: "0644"
+  notify: Restart PVE exporter
+
+- name: Start PVE exporter
+  community.docker.docker_compose_v2:
+    project_src: /opt/monitoring/pve-exporter
+    state: present
+    pull: missing

@@ -1,0 +1,5 @@
+---
+- name: Create the containers and VMs and bootstrap them
+  ansible.builtin.import_playbook: provision.yml
+- name: Configure every host
+  ansible.builtin.import_playbook: configure.yml

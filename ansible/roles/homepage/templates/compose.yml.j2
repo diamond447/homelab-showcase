@@ -1,0 +1,91 @@
+name: homepage
+
+x-homepage: &homepage
+  image: {{ homepage_image }}
+  restart: unless-stopped
+  cpus: 0.5
+  mem_limit: 256m
+  pids_limit: 128
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: local
+    options:
+      max-size: 10m
+      max-file: "3"
+
+x-homepage-env: &homepage-env
+  HOMEPAGE_ALLOWED_HOSTS: {{ homepage_domain }}
+  PUID: "{{ homepage_uid }}"
+  PGID: "{{ homepage_gid }}"
+  LOG_TARGETS: stdout
+
+services:
+  homepage-users:
+    <<: *homepage
+    environment:
+      <<: *homepage-env
+    volumes:
+      - ./users:/app/config
+    networks:
+      apps-net:
+        aliases:
+          - homepage-users
+
+  homepage-admins:
+    <<: *homepage
+    environment:
+      <<: *homepage-env
+    env_file:
+      - admins.env
+    volumes:
+      - ./admins:/app/config
+    networks:
+      apps-net:
+        aliases:
+          - homepage-admins
+      homepage-api: {}
+
+  # Stats and agent VM control. Only homepage-admins and the apps01 proxy
+  # share its network; `default` is its own way out to Prometheus and Proxmox.
+  homepage-api:
+    build:
+      context: ./api
+      args:
+        PYTHON_VERSION: "{{ homepage_python_version }}"
+    image: homepage-api:local
+    restart: unless-stopped
+    env_file:
+      - api.env
+    volumes:
+      - ./api/config:/config:ro
+    networks:
+      default: {}
+      homepage-api:
+        aliases:
+          - homepage-api
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 0.25
+    mem_limit: 64m
+    pids_limit: 32
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), 2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  apps-net:
+    external: true
+  homepage-api:
+    external: true

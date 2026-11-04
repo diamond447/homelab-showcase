@@ -1,0 +1,27 @@
+---
+- name: Deploy monitoring firewall script
+  ansible.builtin.template:
+    src: monitoring-firewall.sh.j2
+    dest: "{{ monitoring_firewall_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: monitoring_firewall_script
+
+- name: Deploy monitoring firewall systemd service
+  ansible.builtin.template:
+    src: monitoring-firewall.service.j2
+    dest: /etc/systemd/system/monitoring-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: monitoring_firewall_unit
+
+# Applied right away, not in a handler: the roles after this one publish new ports, and
+# they must never be up without their rules (handlers run only at the end of the play).
+- name: Enable and start monitoring firewall service
+  ansible.builtin.systemd:
+    name: monitoring-firewall
+    enabled: true
+    state: "{{ 'restarted' if monitoring_firewall_script.changed or monitoring_firewall_unit.changed else 'started' }}"
+    daemon_reload: true

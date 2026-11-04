@@ -1,0 +1,326 @@
+timezone: Europe/Prague
+
+admin_user: admin
+
+admin_ssh_public_key: "ssh-ed25519 AAAA-your-public-key homelab"
+
+common_packages:
+  - sudo
+  - curl
+  - ca-certificates
+  - vim
+  - git
+  - htop
+  - python3
+  - openssh-server
+
+homelab_network_prefix: "10.10.0"
+homelab_gateway: "10.0.10.1"
+homelab_bridge: "vmbr1"
+
+homelab_dhcp_start: 200
+homelab_dhcp_limit: 50
+homelab_dhcp_leasetime: "12h"
+
+proxmox_api_host: "{{ pve_host }}"
+proxmox_api_user: "root@pam"
+proxmox_api_token_id: "ansible"
+
+ansible_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/homelab"
+
+homelab_domain: "example.com"
+
+authentik_domain: "auth.example.com"
+authentik_host: "10.0.10.102"
+authentik_port: 9000
+authentik_version: "2026.8.2"
+# sha256sum /opt/authentik/compose.yml on auth01 after verifying it matches upstream
+authentik_compose_sha256: ""
+
+
+google_oauth_client_id: "your-client-id.apps.googleusercontent.com"
+
+uptime_kuma_version: "2.5.5"
+uptime_kuma_domain: "status.example.com"
+uptime_kuma_host: "10.0.10.104"
+uptime_kuma_port: 3001
+
+monitor_host: "10.0.10.104"
+
+alertmanager_version: "0.34.1"
+alertmanager_port: 9093
+alertmanager_domain: "alerts.example.com"
+# Self-hosted ntfy on monitor01 (role ntfy) for every homelab notification. Publishers
+# use the LAN address; phones subscribe through ntfy_domain.
+ntfy_domain: "ntfy.example.com"
+ntfy_port: 2586
+ntfy_image: "binwiederhier/ntfy:v2.30.0@sha256:8563a39da2f5a47360618b2ab9200239c76b37f4145f6d627d9ab4368abd23f0"
+ntfy_server: "http://{{ monitor_host }}:{{ ntfy_port }}"
+
+prometheus_version: "3.14.0"
+prometheus_port: 9090
+prometheus_domain: "prometheus.example.com"
+
+grafana_version: "13.2.1"
+grafana_port: 3000
+grafana_domain: "grafana.example.com"
+grafana_oidc_client_id: "generate-with-openssl-rand-hex-20"
+actual_domain: "budget.example.com"
+actual_oidc_client_id: "generate-with-openssl-rand-hex-20"
+
+pve_exporter_version: "3.9.0"
+pve_exporter_port: 9221
+pve_monitoring_user: "prometheus@pve"
+pve_monitoring_token_name: "monitoring"
+pve_host: "10.0.10.254"
+
+smartctl_exporter_version: "0.14.0"
+smartctl_exporter_port: 9633
+
+
+# Isolated network for autonomous agent VMs. vmbr2 has no physical port;
+# the OpenWrt VM gets a NIC on it and is the only way in or out.
+agents_bridge: "vmbr2"
+agents_network_prefix: "10.20.0"
+agents_gateway: "10.0.20.1"
+agents_openwrt_vm_name: "openwrt"
+agents_openwrt_mac: "BC:24:11:20:00:01"
+
+agent_vm_host: "10.0.20.110"
+
+# Egress proxy for the agents zone: OpenWrt redirects its TCP 80/443 here and
+# nginx allows it by host name (TLS SNI / HTTP Host), like Docker sbx.
+agents_egress_host: "{{ homelab_network_prefix }}.105"
+
+# The agents subnet is only reachable through OpenWrt, so SSH jumps via it.
+agents_ssh_common_args: >-
+  -o ProxyCommand="ssh -i {{ lookup('env', 'HOME') }}/.ssh/homelab -W %h:%p root@{{ homelab_gateway }}"
+  -o StrictHostKeyChecking=accept-new
+
+# Web UI for the agents egress allowlist, behind Authentik forward auth.
+agentnet_domain: "agentnet.example.com"
+agentnet_host: "{{ monitor_host }}"
+agentnet_port: 8088
+
+# Services exposed on edge01 nginx reverse proxy and configured in Authentik.
+# access: users (default when omitted) | admins | none
+# buffering: false turns off nginx response buffering (streaming endpoints).
+# strip_authorization: true drops the client's Authorization header (upstream basic auth).
+# public_paths: [{pattern, upstream?}] regex paths of a forward-auth site served without
+# forward auth (the upstream authenticates itself), optionally from another upstream.
+edge_services:
+  - name: authentik
+    domain: "{{ authentik_domain }}"
+    upstream: "http://{{ authentik_host }}:{{ authentik_port }}"
+    access: "none"
+  - name: uptime-kuma
+    domain: "{{ uptime_kuma_domain }}"
+    upstream: "http://{{ uptime_kuma_host }}:{{ uptime_kuma_port }}"
+    access: "none"
+    protected_access: "admins"
+    protected_paths:
+      - /socket.io
+      - /dashboard
+      - /settings
+      - /manage-status-page
+      - /add
+      - /edit
+      - /clone
+      - /maintenance
+      - /setup
+      - /setup-database
+      - /metrics
+      - /list
+      - /empty
+    redirect_paths:
+      - path: /admin
+        target: /dashboard
+  - name: agentnet
+    domain: "{{ agentnet_domain }}"
+    upstream: "http://{{ agentnet_host }}:{{ agentnet_port }}"
+    access: "admins"
+  # Grafana signs people in itself (Authentik OIDC). Its /metrics is public by default
+  # and nothing scrapes it through edge. Basic auth stays on for the admin Homepage
+  # widget on the LAN, so edge drops Authorization: no password guessing from outside.
+  - name: grafana
+    domain: "{{ grafana_domain }}"
+    upstream: "http://{{ monitor_host }}:{{ grafana_port }}"
+    access: "none"
+    strip_authorization: true
+    deny_paths:
+      - '^/metrics'
+  # ntfy signs people in itself (deny-all by default). Its JSON and SSE subscription
+  # streams send no X-Accel-Buffering header, so nginx must not buffer them.
+  - name: ntfy
+    domain: "{{ ntfy_domain }}"
+    upstream: "http://{{ monitor_host }}:{{ ntfy_port }}"
+    access: "none"
+    buffering: false
+  - name: prometheus
+    domain: "{{ prometheus_domain }}"
+    upstream: "http://{{ monitor_host }}:{{ prometheus_port }}"
+    access: "admins"
+  - name: alertmanager
+    domain: "{{ alertmanager_domain }}"
+    upstream: "http://{{ monitor_host }}:{{ alertmanager_port }}"
+    access: "admins"
+  # Apex dashboard. The apps01 proxy picks the admin or the users Homepage
+  # instance from the X-authentik-groups header that edge sets after forward auth.
+  - name: homepage
+    domain: "{{ homepage_domain }}"
+    upstream: "http://{{ apps01_host }}:{{ apps01_wasm_port }}"
+    access: "users"
+  - name: actual
+    domain: "{{ actual_domain }}"
+    upstream: "http://{{ apps01_host }}:{{ apps01_wasm_port }}"
+    read_timeout: 3600s
+    on_demand:
+      display_name: "Actual Budget"
+      upstream: actual:5006
+      memory_limit: 768m
+      healthcheck:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://127.0.0.1:5006/health').then(r=>r.json()).then(x=>process.exit(x.status==='UP'?0:1)).catch(()=>process.exit(1))"
+      # Family fork of Actual (diamond447/actual), built by its Fork Docker Image
+      # workflow. Pin a new digest after each fork release.
+      image: "ghcr.io/diamond447/actual:sha-8d873d6@sha256:fa4983c8d0f6b69fd1e8c03ab9e36bb30368cf851e58c785ee7c97014eb14348"
+  - name: bentopdf
+    domain: "pdf.example.com"
+    upstream: "http://{{ apps01_host }}:{{ apps01_wasm_port }}"
+    read_timeout: 3600s
+    on_demand:
+      display_name: "BentoPDF"
+      upstream: bentopdf:8080
+      memory_limit: 768m
+      healthcheck: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      image: "ghcr.io/alam00000/bentopdf-simple:2.8.8@sha256:3d62b8f8eece5fe947026ac3925ff08fda245b3d6ba2c3916b94da91e0010c74"
+  - name: omnitools
+    domain: "tools.example.com"
+    upstream: "http://{{ apps01_host }}:{{ apps01_wasm_port }}"
+    read_timeout: 3600s
+    on_demand:
+      display_name: "OmniTools"
+      upstream: omnitools:80
+      memory_limit: 384m
+      healthcheck: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
+      image: "iib0011/omni-tools:0.6.0@sha256:ceb5acc317daf387634f7f212cefe4722fd1243ad1cba74203f25254195b6c69"
+  - name: cyberchef
+    domain: "cyberchef.example.com"
+    upstream: "http://{{ apps01_host }}:{{ apps01_wasm_port }}"
+    read_timeout: 3600s
+    on_demand:
+      display_name: "CyberChef"
+      upstream: cyberchef:8080
+      memory_limit: 512m
+      healthcheck: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      image: "ghcr.io/gchq/cyberchef:11.5.0@sha256:f04a39926344faf8e4cbbc8c92fb125d2b466f9be62db09aff23c7c406101a51"
+  - name: health-coach
+    domain: "{{ health_coach_domain }}"
+    upstream: "http://{{ health_coach_host }}:{{ health_coach_mcp_port }}"
+    access: "none"
+    read_timeout: 3600s
+    deny_paths:
+      - '^/(?!mcp(?:/|$)|\.well-known/oauth-protected-resource(?:/|$)|healthz$)'
+  # Healthstats PWA (read-only scores and trends from the health database), owner only.
+  # The app also checks X-authentik-username against health_coach_allowed_users.
+  - name: healthstats
+    domain: "{{ healthstats_domain }}"
+    upstream: "http://{{ health_coach_host }}:{{ health_coach_web_port }}"
+    access: "admins"
+    public_paths:
+      # iOS fetches the home-screen icon and manifest without the session cookie.
+      - pattern: '^/(?:icons/[a-z0-9-]+\.png|manifest\.webmanifest|healthz)$'
+  # openGym behind forward auth for the web app. Its API signs people in itself and the
+  # PWA's preflight requests carry no cookies, so /api/ skips forward auth (as openGym's
+  # docs require); the Fit MCP endpoint validates Authentik tokens on its own.
+  - name: fit
+    domain: "{{ fit_domain }}"
+    upstream: "http://{{ health_coach_host }}:{{ fit_web_port }}"
+    read_timeout: 3600s
+    public_paths:
+      - pattern: '^/api/'
+        upstream: "http://{{ health_coach_host }}:{{ fit_web_port }}"
+      - pattern: '^/(?:mcp(?:/|$)|\.well-known/oauth-protected-resource(?:/|$))'
+        upstream: "http://{{ health_coach_host }}:{{ fit_mcp_port }}"
+      # iOS fetches the home-screen icon and manifest without the session cookie.
+      - pattern: '^/(?:icon-(?:180|512)\.png|manifest\.json)$'
+        upstream: "http://{{ health_coach_host }}:{{ fit_web_port }}"
+  # Nextcloud signs people in itself (Authentik OIDC); forward auth would break the
+  # sync clients and WebDAV. Uploads come in chunks below Cloudflare's 100 MB limit.
+  - name: nextcloud
+    domain: "{{ nextcloud_domain }}"
+    upstream: "http://{{ nextcloud_host }}:{{ nextcloud_port }}"
+    access: "none"
+    buffering: false
+    max_body_size: 100m
+    read_timeout: 3600s
+    # Nextcloud's setup check asks for HSTS; Cloudflare always serves HTTPS.
+    hsts: true
+    # Apache in the image would answer these with an http:// redirect.
+    redirect_paths:
+      - path: = /.well-known/carddav
+        target: /remote.php/dav/
+      - path: = /.well-known/caldav
+        target: /remote.php/dav/
+
+# Homepage dashboard on apps01: one instance per audience, same image.
+homepage_domain: "{{ homelab_domain }}"
+homepage_image: "ghcr.io/gethomepage/homepage:v2.4.0@sha256:643bd0be730d40f69d58028a55d1a896739333e8815786df42bc97f109ecbe61"
+
+sablier_version: "1.18.0"
+sablier_image: "sablierapp/sablier:1.18.0@sha256:c00c8a01c8c809dd258a8b362ad8ba9a9227753fc9857ae7506fd427175e038c"
+socket_proxy_image: "linuxserver/socket-proxy:3.4.5-r0-ls99@sha256:ca6c0301a652232d02cb0ff9f1c5d20d9b339f391e1c1dffaae6ef3bfc59d009"
+proxy_wasm_plugin_version: "v1.1.0"
+proxy_wasm_plugin_sha256: "1682802d2c53023bba032e8a50a3af9bca0b4d2233c1a7ed476340a6be0a83f1"
+wasmx_archive: "wasmx-prerelease-0.6.0-v8-x86_64-ubuntu22.04.tar.gz"
+wasmx_archive_sha256: "8556a4c612e04d36a1c1a420b9462de02bab46607928e6f8170f7c19ea6a1007"
+wasm_base_image: "ubuntu:22.04@sha256:281c5745f657873d78e5531fc5ba8575f46ab7769b94550ac99543f122679986"
+
+apps01_host: "{{ homelab_network_prefix }}.103"
+edge01_host: "{{ homelab_network_prefix }}.100"
+apps01_wasm_port: 8080
+
+# myapps01: self-developed apps
+myapps_host: "{{ homelab_network_prefix }}.107"
+
+# nextcloud01: Nextcloud (role nextcloud), sign-in through Authentik OIDC
+nextcloud_host: "{{ homelab_network_prefix }}.108"
+nextcloud_port: 8080
+nextcloud_domain: "cloud.{{ homelab_domain }}"
+nextcloud_oidc_client_id: "generate-with-openssl-rand-hex-20"
+
+# health01: Health Coach MCP server, and Fit (openGym tracker + Fit MCP server)
+health_coach_host: "{{ homelab_network_prefix }}.106"
+health_coach_domain: "coach.{{ homelab_domain }}"
+health_coach_mcp_port: 8080
+health_coach_db_port: 5432
+healthstats_domain: "healthstats.{{ homelab_domain }}"
+health_coach_web_port: 8092
+fit_domain: "fit.{{ homelab_domain }}"
+fit_web_port: 8090
+fit_mcp_port: 8091
+# Compose project of the fit role; the health_coach backup archives its data
+fit_dir: /opt/apps/fit
+# openGym release; must match the image tags in roles/fit/defaults/main.yml
+fit_opengym_version: "1.4.1"
+# openGym admins besides the first registered profile (Settings -> Account -> Account ID)
+fit_opengym_admin_uids: []
+# Invite codes for new profiles. Off only for the very first run, while you register the
+# first profile (it becomes admin): `-e fit_opengym_invite_only=false`, register right away,
+# then run again without it. /api/ is public, so anyone could sign up while it is off.
+fit_opengym_invite_only: true
+# Authentik OAuth client for the Fit MCP connector (Claude, ChatGPT, Gemini), shared by
+# every user; generate like Grafana's (`openssl rand -hex 20`, non-secret). Secret in
+# vault_fit_oidc_client_secret. Empty: the provider is not created.
+fit_oidc_client_id: "generate-with-openssl-rand-hex-20"
+# health-coach image built from main at eb6b795 (tag sha-eb6b795), pinned by digest
+health_coach_image: "ghcr.io/diamond447/health-coach:sha-eb6b795@sha256:eec386ea7262c0860e83152b5d870ac58c72ce94240ccf49c4429cd4f48256a9"
+# Authentik OIDC client ID for Health Coach (generate like Grafana's: `openssl rand -hex 20`, non-secret)
+health_coach_oidc_client_id: "generate-with-openssl-rand-hex-20"
+# Authentik usernames allowed to use the connector; the token `sub` is the username
+health_coach_allowed_users: ["your-authentik-username"]
+# Google Cloud OAuth client for the Google Health API (secret in
+# vault_health_coach_google_client_secret). Empty: Google jobs stay disabled.
+health_coach_google_client_id: "your-client-id.apps.googleusercontent.com"

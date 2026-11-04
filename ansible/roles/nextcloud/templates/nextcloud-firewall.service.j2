@@ -1,0 +1,14 @@
+[Unit]
+Description=Restrict LAN access to the Docker-published Nextcloud port
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ nextcloud_firewall_script_path }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target docker.service

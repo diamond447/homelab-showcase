@@ -1,0 +1,298 @@
+---
+- name: Provision homelab LXC containers
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/containers.yml
+    - ../vars/vault.yml
+
+  vars:
+    proxmox_node: pve
+    proxmox_storage: local-lvm
+
+  tasks:
+    - name: Check whether containers already exist
+      community.proxmox.proxmox_vm_info:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+        type: lxc
+        vmid: "{{ item.value.proxmox_id }}"
+      loop: "{{ homelab_containers | dict2items }}"
+      register: container_info
+      no_log: true
+
+    - name: Create missing containers
+      community.proxmox.proxmox:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.item.value.proxmox_id }}"
+        hostname: "{{ item.item.key }}"
+
+        ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
+        ostype: debian
+
+        disk: "{{ proxmox_storage }}:{{ item.item.value.disk_gb | default(8) }}"
+        cores: "{{ item.item.value.cores | default(1) }}"
+        memory: "{{ item.item.value.memory | default(512) }}"
+        swap: "{{ item.item.value.swap | default(512) }}"
+        features: "{{ item.item.value.features | default(omit) }}"
+        mounts: "{{ item.item.value.mounts | default(omit) }}"
+
+        netif:
+          net0: "name=eth0,bridge={{ homelab_bridge }},ip={{ homelab_network_prefix }}.{{ item.item.value.proxmox_id }}/24,gw={{ homelab_gateway }}"
+
+        nameserver: "{{ homelab_gateway }}"
+        timezone: "{{ timezone }}"
+
+        pubkey: "{{ admin_ssh_public_key }}"
+
+        unprivileged: true
+        onboot: true
+
+        state: present
+      loop: "{{ container_info.results }}"
+      when: item.proxmox_vms | length == 0
+      no_log: true
+
+    - name: Wait until containers are fully registered
+      community.proxmox.proxmox_vm_info:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+        type: lxc
+        vmid: "{{ item.value.proxmox_id }}"
+
+      loop: "{{ homelab_containers | dict2items }}"
+      register: registered_container
+
+      until:
+        - registered_container.proxmox_vms | length > 0
+        - registered_container.proxmox_vms[0].name is defined
+        - registered_container.proxmox_vms[0].name == item.key
+
+      retries: 15
+      delay: 2
+      no_log: true
+
+    - name: Start containers
+      community.proxmox.proxmox:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.value.proxmox_id }}"
+        state: started
+      loop: "{{ homelab_containers | dict2items }}"
+      no_log: true
+
+    # A freshly started container may not run sshd yet; scanning too early
+    # returns no key, and the bootstrap play's own wait comes only later.
+    - name: Wait for SSH on bootstrap targets
+      ansible.builtin.wait_for:
+        host: "{{ homelab_network_prefix }}.{{ item.value.proxmox_id }}"
+        port: 22
+        timeout: 120
+        delay: 1
+      loop: "{{ homelab_containers | dict2items }}"
+      when: item.value.bootstrap | default(true)
+
+    # Re-created containers have new host keys; only clear keys for containers created in this run.
+    - name: Remove old SSH host keys for bootstrap targets
+      ansible.builtin.known_hosts:
+        name: "{{ homelab_network_prefix }}.{{ item.item.value.proxmox_id }}"
+        state: absent
+      loop: "{{ container_info.results }}"
+      delegate_to: localhost
+      when:
+        - item.item.value.bootstrap | default(true)
+        - item.proxmox_vms | length == 0
+
+    # Scan keys for newly created containers or if known_hosts has no entry yet (accept-new).
+    - name: Scan SSH host keys for bootstrap targets
+      ansible.builtin.known_hosts:
+        name: "{{ homelab_network_prefix }}.{{ item.item.value.proxmox_id }}"
+        key: >-
+          {{
+            lookup(
+              'pipe',
+              'ssh-keyscan -T 10 -H ' ~
+              homelab_network_prefix ~ '.' ~
+              item.item.value.proxmox_id
+            )
+          }}
+        state: present
+      loop: "{{ container_info.results }}"
+      delegate_to: localhost
+      when:
+        - item.item.value.bootstrap | default(true)
+        - >-
+          item.proxmox_vms | length == 0 or
+          lookup(
+            'pipe',
+            'ssh-keygen -F ' ~
+            homelab_network_prefix ~ '.' ~
+            item.item.value.proxmox_id ~
+            ' 2>/dev/null',
+            errors='ignore'
+          ) is none
+
+    - name: Add containers to bootstrap group
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        groups: bootstrap_targets
+        ansible_host: "{{ homelab_network_prefix }}.{{ item.value.proxmox_id }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/homelab"
+        homelab_roles: "{{ item.value.roles | default(['common']) }}"
+      loop: "{{ homelab_containers | dict2items }}"
+      when: item.value.bootstrap | default(true)
+      changed_when: false
+
+- name: Bootstrap new homelab containers
+  hosts: bootstrap_targets
+  gather_facts: false
+
+  vars_files:
+    - ../vars/vault.yml
+
+  pre_tasks:
+    - name: Wait for SSH
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 120
+        delay: 1
+      delegate_to: localhost
+
+    - name: Install Python and sudo
+      ansible.builtin.raw: |
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y python3 sudo
+      changed_when: false
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+    - name: Create admin user
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        shell: /bin/bash
+        create_home: true
+        groups:
+          - sudo
+        append: true
+        password: >-
+          {{
+            vault_admin_password
+            | password_hash(
+                'sha512',
+                65534 | random(seed=inventory_hostname) | string,
+                rounds=10000
+              )
+          }}
+        update_password: always
+      no_log: true
+
+    - name: Create admin SSH directory
+      ansible.builtin.file:
+        path: "/home/{{ admin_user }}/.ssh"
+        state: directory
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: "0700"
+
+    - name: Install homelab SSH key for admin
+      ansible.builtin.copy:
+        content: "{{ admin_ssh_public_key }}\n"
+        dest: "/home/{{ admin_user }}/.ssh/authorized_keys"
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: "0600"
+
+  roles:
+    - common
+
+- name: Provision homelab VMs
+  hosts: proxmox_hosts
+  gather_facts: false
+
+  vars_files:
+    - ../vars/vms.yml
+
+  roles:
+    - pve_vms
+
+- name: Configure OpenWrt
+  hosts: routers
+  gather_facts: false
+
+  tasks:
+    - name: Configure DHCP pool
+      ansible.builtin.include_role:
+        name: openwrt
+
+    - name: Configure agents zone
+      ansible.builtin.include_role:
+        name: openwrt
+        tasks_from: agents
+
+- name: Wait for VMs to finish cloud-init
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/vms.yml
+
+  tasks:
+    - name: Add VMs to bootstrap group
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        groups: vm_targets
+        ansible_host: "{{ item.value.network_prefix | default(homelab_network_prefix) }}.{{ item.value.proxmox_id }}"
+        ansible_user: "{{ admin_user }}"
+        ansible_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/homelab"
+        ansible_ssh_common_args: "{{ agents_ssh_common_args if item.value.bridge | default(homelab_bridge) == agents_bridge else '' }}"
+      loop: "{{ homelab_vms | dict2items }}"
+      changed_when: false
+
+- name: Wait for VM SSH and cloud-init
+  hosts: vm_targets
+  gather_facts: false
+
+  tasks:
+    - name: Wait until SSH answers
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    # Only waits for cloud-init to finish. Its result does not matter: the
+    # common role does the package work that cloud-init may have failed at.
+    - name: Wait for cloud-init
+      ansible.builtin.command: cloud-init status --wait --long
+      register: vm_cloud_init
+      changed_when: false
+      failed_when: false
+
+    - name: Show cloud-init result
+      ansible.builtin.debug:
+        var: vm_cloud_init.stdout_lines
+      when: vm_cloud_init.rc != 0

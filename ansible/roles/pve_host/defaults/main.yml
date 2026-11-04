@@ -1,0 +1,33 @@
+---
+# Nightly backup of the guests that hold data to Proxmox Backup Server on this
+# host (role pbs), which keeps the newest 2 of each. Still the same disk: it covers
+# mistakes and broken upgrades; the owner's laptop copy covers a failed disk.
+# edge01 and egress01 hold nothing that Ansible does not recreate; agent01 is disposable.
+pve_host_backup_job_id: homelab-nightly
+pve_host_backup_vmids:
+  - "{{ homelab_containers.auth01.proxmox_id }}"
+  - "{{ homelab_containers.apps01.proxmox_id }}"
+  - "{{ homelab_containers.monitor01.proxmox_id }}"
+  - "{{ homelab_containers.health01.proxmox_id }}"
+  - "{{ homelab_containers.myapps01.proxmox_id }}"
+  - "{{ homelab_containers.nextcloud01.proxmox_id }}"
+# Same as pbs_pve_storage (role pbs runs first and creates it).
+pve_host_backup_storage: pbs-homelab
+# After the in-guest database dumps (health01 at 03:15, nextcloud01 at 03:30).
+pve_host_backup_schedule: "04:00"
+# PBS prunes on its own (pbs_keep_last); PVE keeps everything it is given.
+pve_host_backup_prune: "keep-all=1"
+# Left out of the container backups (PBS patterns; `?*` keeps the directory itself).
+# Container images and layers come back with `configure.yml` (pinned by digest or
+# built by Ansible), so a restored guest needs that run before its apps start.
+# Docker keeps them under /var/lib/docker (overlay2 store) or /var/lib/containerd
+# (containerd image store, the default for new installs since Docker 29);
+# containers' writable layers go with them, so app data must live in volumes or
+# bind mounts. Prometheus history (monitor01) is not worth the space.
+pve_host_backup_exclude_paths:
+  - /var/lib/docker/overlay2/?*
+  - /var/lib/docker/image/?*
+  - /var/lib/docker/containers/?*
+  - /var/lib/docker/buildkit/?*
+  - /var/lib/containerd/?*
+  - /var/lib/docker/volumes/prometheus_prometheus-data/_data/?*

@@ -1,0 +1,6 @@
+---
+ntfy_dir: /opt/monitoring/ntfy
+# uid/gid the server runs as inside the container; owns the cache and auth database.
+# Not 1000: that is the admin sudoer on the host.
+ntfy_uid: 10002
+ntfy_owner_user: "{{ admin_user }}"

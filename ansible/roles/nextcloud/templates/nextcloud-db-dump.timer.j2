@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly Nextcloud database dump
+
+[Timer]
+OnCalendar={{ nextcloud_dump_schedule }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

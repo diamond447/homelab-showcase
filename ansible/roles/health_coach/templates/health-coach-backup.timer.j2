@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly backup for Health Coach database and Fit data timer
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

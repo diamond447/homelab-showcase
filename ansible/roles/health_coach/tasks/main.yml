@@ -1,0 +1,137 @@
+---
+- name: Assert Health Coach required variables are set
+  ansible.builtin.assert:
+    that:
+      - health_coach_oidc_client_id is defined
+      - health_coach_oidc_client_id | length > 0
+      - health_coach_allowed_users is defined
+      - health_coach_allowed_users | length > 0
+    fail_msg: >-
+      health_coach_oidc_client_id and health_coach_allowed_users must be set in
+      inventory (e.g. group_vars/all.yml). Generate an OIDC client ID with
+      `openssl rand -hex 20` and set allowed Authentik usernames in
+      health_coach_allowed_users.
+    quiet: true
+
+# Restrict LAN access to Docker-published ports on health01
+- name: Deploy Health Coach firewall script
+  ansible.builtin.template:
+    src: health-firewall.sh.j2
+    dest: "{{ health_coach_firewall_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: health_coach_firewall_script
+
+- name: Deploy Health Coach firewall systemd service
+  ansible.builtin.template:
+    src: health-firewall.service.j2
+    dest: /etc/systemd/system/health-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: health_coach_firewall_unit
+
+# Applied right away, not in a handler: compose publishes new ports further down, and
+# they must never be up without their rules (handlers run only at the end of the play).
+- name: Enable and start Health Coach firewall service
+  ansible.builtin.systemd:
+    name: health-firewall
+    enabled: true
+    state: "{{ 'restarted' if health_coach_firewall_script.changed or health_coach_firewall_unit.changed else 'started' }}"
+    daemon_reload: true
+
+# Application files in /opt/apps/health-coach
+- name: Create Health Coach application directory
+  ansible.builtin.file:
+    path: "{{ health_coach_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# One env file per service, so the internet-facing mcp and web containers never get
+# the superuser password, the token key or the Google client secret.
+- name: Deploy Health Coach env files
+  ansible.builtin.template:
+    src: "{{ item }}.env.j2"
+    dest: "{{ health_coach_dir }}/{{ item }}.env"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: [db, migrate, worker, mcp, web]
+  notify: Restart Health Coach
+  no_log: true
+
+- name: Deploy Health Coach compose file
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ health_coach_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Health Coach
+
+# Nightly backup setup for Health Coach database and Fit data
+- name: Create Health Coach backup directory
+  ansible.builtin.file:
+    path: "{{ health_coach_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Deploy Health Coach backup script
+  ansible.builtin.template:
+    src: health-coach-backup.sh.j2
+    dest: /usr/local/sbin/health-coach-backup.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy Health Coach backup systemd service
+  ansible.builtin.template:
+    src: health-coach-backup.service.j2
+    dest: /etc/systemd/system/health-coach-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy backup failure alert (ntfy topic is secret)
+  ansible.builtin.template:
+    src: health-coach-backup-alert.env.j2
+    dest: /etc/health-coach-backup-alert.env
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Deploy backup failure alert unit
+  ansible.builtin.template:
+    src: health-coach-backup-alert.service.j2
+    dest: /etc/systemd/system/health-coach-backup-alert.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy Health Coach backup systemd timer
+  ansible.builtin.template:
+    src: health-coach-backup.timer.j2
+    dest: /etc/systemd/system/health-coach-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable and start Health Coach backup timer
+  ansible.builtin.systemd:
+    name: health-coach-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Start Health Coach
+  community.docker.docker_compose_v2:
+    project_src: "{{ health_coach_dir }}"
+    pull: always
+    state: present
+    wait: true

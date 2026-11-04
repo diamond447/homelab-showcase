@@ -1,0 +1,14 @@
+services:
+  pve-exporter:
+    image: prompve/prometheus-pve-exporter:{{ pve_exporter_version }}
+    container_name: pve-exporter
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "{{ monitor_host }}:{{ pve_exporter_port }}:9221"
+    volumes:
+      - ./pve.yml:/etc/prometheus/pve.yml:ro

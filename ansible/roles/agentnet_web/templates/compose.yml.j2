@@ -1,0 +1,29 @@
+services:
+  agentnet-web:
+    build:
+      context: .
+      args:
+        PYTHON_VERSION: "{{ agentnet_web_python_version }}"
+    image: agentnet-web:local
+    container_name: agentnet-web
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      AGENTNET_BACKEND: "root@{{ agentnet_web_backend_host }}"
+      AGENTNET_ORIGIN: "https://{{ agentnet_domain }}"
+      AGENTNET_TRUSTED_PROXY: "{{ agentnet_web_trusted_proxy }}"
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "{{ agentnet_host }}:{{ agentnet_port }}:8080"
+    volumes:
+      - ./ssh:/ssh:ro

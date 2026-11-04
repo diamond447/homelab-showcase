@@ -1,0 +1,112 @@
+global:
+  scrape_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - "{{ monitor_host }}:{{ alertmanager_port }}"
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  - job_name: alertmanager
+    static_configs:
+      - targets:
+          - "{{ monitor_host }}:{{ alertmanager_port }}"
+
+  - job_name: node
+    static_configs:
+      - targets:
+          - 10.0.10.100:9100
+        labels:
+          host: edge01
+          type: lxc
+
+      - targets:
+          - 10.0.10.102:9100
+        labels:
+          host: auth01
+          type: lxc
+
+      - targets:
+          - 10.0.10.103:9100
+        labels:
+          host: apps01
+          type: lxc
+
+      - targets:
+          - 10.0.10.104:9100
+        labels:
+          host: monitor01
+          type: lxc
+
+      - targets:
+          - "{{ health_coach_host }}:9100"
+        labels:
+          host: health01
+          type: lxc
+
+      - targets:
+          - "{{ myapps_host }}:9100"
+        labels:
+          host: myapps01
+          type: lxc
+
+      - targets:
+          - "{{ nextcloud_host }}:9100"
+        labels:
+          host: nextcloud01
+          type: lxc
+
+      - targets:
+          - {{ agents_egress_host }}:9100
+        labels:
+          host: egress01
+          type: lxc
+
+      - targets:
+          - {{ agent_vm_host }}:9100
+        labels:
+          host: agent01
+          type: vm
+
+      - targets:
+          - 10.0.10.254:9100
+        labels:
+          host: pve01
+          type: proxmox
+  - job_name: pve
+    static_configs:
+      - targets:
+          - {{ pve_host }}
+
+    metrics_path: /pve
+
+    params:
+      module: [default]
+      cluster: ["1"]
+      node: ["1"]
+
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+
+      - source_labels: [__param_target]
+        target_label: instance
+
+      - target_label: __address__
+        replacement: 10.0.10.104:9221
+
+  - job_name: smartctl
+    static_configs:
+      - targets:
+          - "{{ pve_host }}:{{ smartctl_exporter_port }}"
+        labels:
+          host: pve01

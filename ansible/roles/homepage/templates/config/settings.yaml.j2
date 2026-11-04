@@ -1,0 +1,44 @@
+---
+# Managed by Ansible (role homepage), {{ homepage_variant }} dashboard.
+title: Homelab
+language: cs
+theme: dark
+color: slate
+headerStyle: clean
+statusStyle: dot
+target: _self
+disableIndexing: true
+{% if homepage_variant == 'admins' %}
+instanceName: admins
+{% else %}
+instanceName: users
+hideVersion: true
+disableUpdateCheck: true
+{% endif %}
+
+# Groups appear in this order: quick links, apps, resources, then the rest.
+layout:
+{% if homepage_variant == 'admins' %}
+  Odkazy:
+    style: row
+    columns: 4
+{% endif %}
+  Aplikace:
+    style: row
+    columns: 4
+{% if homepage_variant == 'admins' %}
+  Zdroje:
+    style: row
+    columns: 2
+{% endif %}
+  Stav:
+    style: row
+    columns: 1
+{% if homepage_variant == 'admins' %}
+  Infrastruktura:
+    style: row
+    columns: 3
+  Monitoring:
+    style: row
+    columns: 3
+{% endif %}

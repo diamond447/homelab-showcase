@@ -1,0 +1,20 @@
+---
+# Managed by Ansible (role homepage), {{ homepage_variant }} dashboard.
+- greeting:
+    text_size: xl
+    text: Homelab
+{% if homepage_variant == 'admins' %}
+
+- search:
+    provider: google
+    focus: true
+    showSearchSuggestions: true
+    target: _blank
+{% endif %}
+
+- datetime:
+    text_size: l
+    locale: cs
+    format:
+      dateStyle: long
+      timeStyle: short

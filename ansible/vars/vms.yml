@@ -1,0 +1,16 @@
+---
+# Full VMs (cloud-init) instead of LXC, for workloads that need their own kernel.
+homelab_vms:
+  agent01:
+    proxmox_id: 110
+    roles:
+      - docker
+      - agent_host
+      - node_exporter
+    cores: 4
+    memory: 6208
+    balloon: 3200
+    disk_gb: 64
+    bridge: "{{ agents_bridge }}"
+    network_prefix: "{{ agents_network_prefix }}"
+    gateway: "{{ agents_gateway }}"

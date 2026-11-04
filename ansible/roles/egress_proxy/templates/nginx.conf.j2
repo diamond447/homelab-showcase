@@ -1,0 +1,103 @@
+# Managed by Ansible. Egress proxy for the agents zone ({{ agents_network_prefix }}.0/24).
+# OpenWrt redirects the zone's TCP 80/443 here. Connections are allowed by the
+# host name the client asks for and are always opened to that name, never to
+# the IP the client originally targeted.
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+error_log /var/log/nginx/error.log;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 1024;
+}
+
+stream {
+    map $ssl_preread_server_name $agents_allowed {
+        hostnames;
+        default 0;
+        include {{ egress_proxy_allowlist }};
+    }
+
+    map $agents_allowed $agents_upstream {
+        1 $ssl_preread_server_name:443;
+        # Nothing listens here, so denied connections are closed at once.
+        default 127.0.0.1:9;
+    }
+
+    # Empty names would shift the log columns agentnet parses.
+    map $ssl_preread_server_name $agents_sni {
+        "" -;
+        default $ssl_preread_server_name;
+    }
+
+    map $ssl_preread_protocol $agents_tls {
+        "" -;
+        default $ssl_preread_protocol;
+    }
+
+    # Field order is shared with the http log and parsed by agentnet; the
+    # upstream address list stays last because it may contain spaces.
+    log_format agents '$time_iso8601 tls $agents_sni $agents_allowed $remote_addr $status '
+                      '$agents_tls $bytes_received $bytes_sent $session_time - - $upstream_addr';
+
+    server {
+        listen 443;
+        allow {{ agents_network_prefix }}.0/24;
+        deny all;
+
+        ssl_preread on;
+        resolver {{ homelab_gateway }} ipv6=off valid=60s;
+        proxy_pass $agents_upstream;
+        proxy_connect_timeout 10s;
+        # Long-lived streams (Remote Control, SSE) stay open while idle.
+        proxy_timeout 1h;
+        access_log /var/log/nginx/agents-tls.log agents;
+    }
+}
+
+http {
+    sendfile on;
+    tcp_nopush on;
+    server_tokens off;
+    access_log off;
+
+    map $host $agents_allowed {
+        hostnames;
+        default 0;
+        include {{ egress_proxy_allowlist }};
+    }
+
+    # Requests nginx rejects before parsing (e.g. CONNECT) have no host.
+    map $host $agents_host {
+        "" -;
+        default $host;
+    }
+
+    log_format agents '$time_iso8601 http $agents_host $agents_allowed $remote_addr $status '
+                      '- $request_length $bytes_sent $request_time $request_method $request_uri $upstream_addr';
+
+    server {
+        listen 80 default_server;
+        allow {{ agents_network_prefix }}.0/24;
+        deny all;
+
+        resolver {{ homelab_gateway }} ipv6=off valid=60s;
+        access_log /var/log/nginx/agents-http.log agents;
+
+        client_max_body_size 0;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 1h;
+
+        location / {
+            if ($agents_allowed = 0) {
+                return 403 "Blocked by the homelab egress proxy: $host\n";
+            }
+            proxy_pass http://$host$request_uri;
+            proxy_set_header Host $host;
+            proxy_set_header Connection "";
+        }
+    }
+}

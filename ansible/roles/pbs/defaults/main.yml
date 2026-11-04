@@ -1,0 +1,19 @@
+---
+# Proxmox Backup Server installed on pve01 itself (Proxmox supports PBS next to PVE).
+pbs_datastore: homelab
+pbs_datastore_path: /mnt/datastore/homelab
+# Keep only the newest backups of each guest. Garbage collection frees the chunks
+# that pruned snapshots no longer use (after PBS's 24 h grace period).
+pbs_keep_last: 2
+pbs_prune_schedule: "05:30"
+pbs_gc_schedule: "06:00"
+
+# PVE writes backups with this user's API token (DatastoreBackup only).
+pbs_pve_user: pve@pbs
+pbs_pve_token_name: pve
+# PVE storage that points at the datastore (used by the pve_host backup job).
+pbs_pve_storage: pbs-homelab
+
+# Read-only user for downloading the newest backups to the owner's laptop
+# (DatastoreReader).
+pbs_reader_user: laptop@pbs

@@ -1,0 +1,12 @@
+---
+# Reports a change on purpose: a handler only notifies the next one when it
+# changed, so changed_when: false here would silently skip the reload.
+- name: Validate nginx configuration
+  ansible.builtin.command: /usr/sbin/nginx -t
+  changed_when: true
+  notify: Reload nginx
+
+- name: Reload nginx
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded

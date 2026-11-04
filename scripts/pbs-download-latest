@@ -1,0 +1,85 @@
+#!/bin/bash
+# Downloads the newest backup of every guest from Proxmox Backup Server on pve01
+# to this machine (the owner's laptop, on the home network). Run as root, so the
+# files keep their owners and permissions:
+#
+#   sudo scripts/pbs-download-latest [target-dir]
+#
+# Needs proxmox-backup-client (AUR) and /etc/homelab-pbs.env with:
+#   PBS_REPOSITORY='laptop@pbs!manjaro@10.0.10.254:homelab'
+#   PBS_PASSWORD='<API token secret>'
+#   PBS_FINGERPRINT='<pve01 PBS certificate fingerprint>'
+# See docs/backups.md (Laptop copy). Each run downloads into a new dated directory and removes
+# the older ones only after everything arrived.
+set -euo pipefail
+
+target=$(realpath -m -- "${1:-/var/backups/homelab}")
+env_file=/etc/homelab-pbs.env
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run as root (sudo), so the restored files keep their owners." >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+set -a; . "$env_file"; set +a
+
+# The backups hold secrets (vault-rendered env files, databases): root only.
+[ -d "$target" ] || install -d -m 700 "$target"
+
+# One run at a time, so the cleanup never removes another run's download.
+exec 9>"$target/.lock"
+if ! flock -n 9; then
+    echo "Another download into $target is running." >&2
+    exit 1
+fi
+
+# Fetched first, so a login or network error stops the script here (set -e).
+listing=$(proxmox-backup-client snapshot list --output-format json)
+
+name=$(date +%F_%H%M%S)
+run="$target/$name"
+partial="$run.partial"
+install -d -m 700 "$partial"
+
+# Newest snapshot per backup group, as "type/id/time".
+mapfile -t snapshots < <(
+    python3 -c '
+import datetime, json, sys
+newest = {}
+for s in json.load(sys.stdin):
+    group = (s["backup-type"], s["backup-id"])
+    if s["backup-time"] > newest.get(group, -1):
+        newest[group] = s["backup-time"]
+for (kind, ident), t in sorted(newest.items()):
+    stamp = datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"{kind}/{ident}/{stamp}")
+' <<<"$listing"
+)
+
+if [ ${#snapshots[@]} -eq 0 ]; then
+    echo "No snapshots found in $PBS_REPOSITORY" >&2
+    exit 1
+fi
+
+for snapshot in "${snapshots[@]}"; do
+    IFS=/ read -r kind ident _ <<<"$snapshot"
+    dir="$partial/$kind-$ident"
+    echo "== $snapshot"
+    if [ "$kind" != ct ]; then
+        # The backup job covers containers only.
+        echo "Skipping $snapshot: not a container backup" >&2
+        continue
+    fi
+    mkdir -p "$dir"
+    proxmox-backup-client restore "$snapshot" pct.conf "$dir/pct.conf"
+    proxmox-backup-client restore "$snapshot" root.pxar "$dir/root"
+    echo "$snapshot" >"$dir/SNAPSHOT"
+done
+
+mv "$partial" "$run"
+# Only directories this script created (dated names), never anything else in $target.
+find "$target" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended \
+    -regex '.*/[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}(\.partial)?' \
+    ! -name "$name" -exec rm -rf -- {} +
+echo "Done: $run"
+du -sh "$run"

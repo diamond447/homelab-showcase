@@ -1,0 +1,5 @@
+# Managed with agentnet on {{ inventory_hostname }}. One ".domain 1;" per line;
+# the leading dot makes nginx match the domain and all its subdomains.
+{% for domain in egress_proxy_seed_domains | sort | unique %}
+.{{ domain }} 1;
+{% endfor %}

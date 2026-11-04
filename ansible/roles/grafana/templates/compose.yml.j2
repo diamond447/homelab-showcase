@@ -1,0 +1,24 @@
+services:
+  grafana:
+    image: grafana/grafana:{{ grafana_version }}
+    container_name: grafana
+    restart: unless-stopped
+    env_file:
+      - .env
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "{{ monitor_host }}:{{ grafana_port }}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./prometheus-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ./health-datasource.yml:/etc/grafana/provisioning/datasources/health.yml:ro
+      - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+      - ./dashboards-health:/var/lib/grafana/dashboards-health:ro
+
+volumes:
+  grafana-data:

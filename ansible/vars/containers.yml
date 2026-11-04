@@ -1,0 +1,121 @@
+---
+homelab_containers:
+  edge01:
+    proxmox_id: 100
+    roles:
+      - edge
+      - node_exporter
+    bootstrap: true
+
+  auth01:
+    proxmox_id: 102
+    roles:
+      - docker
+      - authentik
+      - node_exporter
+    bootstrap: true
+    cores: 2
+    memory: 2048
+    swap: 512
+    disk_gb: 16
+    features:
+      - nesting=1
+
+  apps01:
+    proxmox_id: 103
+    roles:
+      - docker
+      - on_demand_apps
+      - homepage
+      - node_exporter
+    bootstrap: true
+    cores: 4
+    memory: 4096
+    swap: 1024
+    disk_gb: 32
+    features:
+      - nesting=1
+
+  egress01:
+    proxmox_id: 105
+    startup: "order=2"
+    roles:
+      - egress_proxy
+      - node_exporter
+    bootstrap: true
+    cores: 1
+    memory: 256
+    swap: 256
+    disk_gb: 4
+
+  # Health coach (MCP, ingest, Postgres) and Fit (openGym tracker + Fit MCP)
+  health01:
+    proxmox_id: 106
+    roles:
+      - docker
+      - health_coach
+      - fit
+      - node_exporter
+    bootstrap: true
+    cores: 2
+    memory: 3072
+    swap: 1024
+    disk_gb: 32
+    features:
+      - nesting=1
+
+  # Self-developed apps (BikeMapy, Auto2ndHandDealFinder). apps01 keeps the
+  # third-party open source apps. Nothing is deployed here yet.
+  myapps01:
+    proxmox_id: 107
+    roles:
+      - docker
+      - node_exporter
+    bootstrap: true
+    cores: 2
+    memory: 2048
+    swap: 512
+    disk_gb: 24
+    features:
+      - nesting=1
+
+  # Nextcloud. User files live on their own mount point, so
+  # they can move to another disk with `pct move-volume 108 mp0 <storage>`
+  # without touching the system disk. backup=1: vzdump skips mount points
+  # unless they ask to be included.
+  nextcloud01:
+    proxmox_id: 108
+    roles:
+      - docker
+      - nextcloud
+      - node_exporter
+    bootstrap: true
+    cores: 2
+    memory: 2048
+    swap: 1024
+    disk_gb: 16
+    mounts:
+      mp0: "local-lvm:32,mp=/srv/nextcloud,backup=1"
+    features:
+      - nesting=1
+
+  monitor01:
+    proxmox_id: 104
+    roles:
+      - docker
+      - monitoring_firewall
+      - ntfy
+      - uptime_kuma
+      - alertmanager
+      - prometheus
+      - grafana
+      - node_exporter
+      - pve_exporter
+      - agentnet_web
+    bootstrap: true
+    cores: 2
+    memory: 2048
+    swap: 512
+    disk_gb: 32
+    features:
+      - nesting=1

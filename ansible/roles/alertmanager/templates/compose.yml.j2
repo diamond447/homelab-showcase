@@ -1,0 +1,22 @@
+services:
+  alertmanager:
+    image: prom/alertmanager:v{{ alertmanager_version }}
+    container_name: alertmanager
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "{{ monitor_host }}:{{ alertmanager_port }}:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.external-url=https://{{ alertmanager_domain }}
+
+volumes:
+  alertmanager-data:

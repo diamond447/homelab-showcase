@@ -1,0 +1,7 @@
+---
+- name: Restart Nextcloud
+  community.docker.docker_compose_v2:
+    project_src: "{{ nextcloud_dir }}"
+    pull: always
+    state: present
+    wait: true

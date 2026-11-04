@@ -1,0 +1,72 @@
+---
+- name: Assert Fit required variables are set
+  ansible.builtin.assert:
+    that:
+      - fit_oidc_client_id | default('') | length > 0
+      - vault_fit_token_key | default('') | length > 0
+      - vault_fit_oidc_client_secret | default('') | length > 0
+    fail_msg: >-
+      fit_oidc_client_id (inventory, `openssl rand -hex 20`), vault_fit_token_key (Fernet
+      key) and vault_fit_oidc_client_secret must be set before deploying Fit.
+    quiet: true
+
+- name: Create fit application directory
+  ansible.builtin.file:
+    path: "{{ fit_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The Fit MCP image runs as uid 10001 (user `app` in the health-coach Dockerfile).
+- name: Create Fit MCP data directory
+  ansible.builtin.file:
+    path: "{{ fit_dir }}/data/fit-mcp"
+    state: directory
+    owner: "10001"
+    group: "10001"
+    mode: "0700"
+
+- name: Create openGym data directory
+  ansible.builtin.file:
+    path: "{{ fit_dir }}/data/opengym"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Deploy openGym env file
+  ansible.builtin.template:
+    src: opengym.env.j2
+    dest: "{{ fit_dir }}/opengym.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart fit
+
+# The Fit MCP server gets only its own settings: no health database, no health token key.
+- name: Deploy Fit MCP env file
+  ansible.builtin.template:
+    src: fit-mcp.env.j2
+    dest: "{{ fit_dir }}/fit-mcp.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart fit
+  no_log: true
+
+- name: Deploy fit compose file
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ fit_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fit
+
+- name: Start fit
+  community.docker.docker_compose_v2:
+    project_src: "{{ fit_dir }}"
+    pull: always
+    state: present
+    wait: true

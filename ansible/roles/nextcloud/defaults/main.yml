@@ -1,0 +1,28 @@
+---
+nextcloud_dir: /opt/apps/nextcloud
+# Mount point mp0 of nextcloud01 (vars/containers.yml): user files and the
+# nightly database dumps, so both move to another disk together.
+nextcloud_volume: /srv/nextcloud
+nextcloud_data_dir: "{{ nextcloud_volume }}/data"
+nextcloud_dump_dir: "{{ nextcloud_volume }}/db-dump"
+# Dumps run before the Proxmox backup job (04:00); the newest 3 are kept.
+nextcloud_dump_schedule: "*-*-* 03:30:00"
+nextcloud_dump_keep: 3
+
+nextcloud_firewall_chain: NEXTCLOUD-FW
+nextcloud_firewall_script_path: /usr/local/sbin/nextcloud-firewall
+nextcloud_firewall_interface: "{{ ansible_default_ipv4.interface | default('eth0') }}"
+
+# Nextcloud's own "stable" channel (one major behind the newest release).
+# Upgrade one major version at a time.
+nextcloud_image: "nextcloud:34.0.5-apache@sha256:515c072ea1cf82ece3503f301fdf75dd5a7148abcc8fa10aaefd5ec56643b703"
+nextcloud_postgres_image: "postgres:17.11-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b"
+nextcloud_redis_image: "redis:8.10.3-alpine@sha256:21090af93f8324db2f0f0f4f38a7c60369d47d917e000c3423d89d2ae2883537"
+
+# Local admin for maintenance (`/login?direct=1`); everyone else signs in with Authentik.
+nextcloud_admin_user: admin
+# Must match the Authentik application slug in the blueprint.
+nextcloud_oidc_slug: nextcloud
+nextcloud_phone_region: CZ
+# Cloudflare accepts at most 100 MB per request, so uploads go in smaller chunks.
+nextcloud_max_chunk_size: 52428800

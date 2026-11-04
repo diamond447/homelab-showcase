@@ -1,0 +1,104 @@
+---
+- name: Create Authentik directory
+  ansible.builtin.file:
+    path: /opt/authentik
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download Authentik Compose file
+  ansible.builtin.get_url:
+    url: "https://goauthentik.io/version/{{ (authentik_version.split('.')[:2]) | join('.') }}/lifecycle/container/compose.yml"
+    dest: /opt/authentik/compose.yml
+    checksum: "{{ ('sha256:' ~ authentik_compose_sha256) if authentik_compose_sha256 else omit }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy Authentik environment
+  ansible.builtin.template:
+    src: authentik.env.j2
+    dest: /opt/authentik/.env
+    owner: root
+    group: root
+    mode: "0600"
+  register: authentik_env
+  no_log: true
+
+- name: Create Authentik blueprint directory
+  ansible.builtin.file:
+    path: /opt/authentik/blueprints
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy Authentik homelab blueprint
+  ansible.builtin.template:
+    src: blueprints/homelab.yaml.j2
+    dest: /opt/authentik/blueprints/homelab.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  register: authentik_blueprint
+
+- name: Deploy Authentik compose override
+  ansible.builtin.copy:
+    dest: /opt/authentik/compose.override.yml
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      services:
+        postgresql:
+          logging:
+            driver: local
+            options:
+              max-size: "10m"
+              max-file: "3"
+
+        server:
+          image: ghcr.io/goauthentik/server:{{ authentik_version }}
+          logging:
+            driver: local
+            options:
+              max-size: "10m"
+              max-file: "3"
+          # Upstream publishes on all addresses; only edge01 needs to reach it on the LAN.
+          ports: !override
+            - "{{ authentik_host }}:{{ authentik_port }}:9000"
+            - "{{ authentik_host }}:9443:9443"
+
+        worker:
+          image: ghcr.io/goauthentik/server:{{ authentik_version }}
+          logging:
+            driver: local
+            options:
+              max-size: "10m"
+              max-file: "3"
+          # Upstream mounts the Docker socket for Docker-managed outposts. The homelab
+          # only uses the embedded outpost, so the worker gets no Docker access.
+          volumes: !override
+            - ./data:/data
+            - ./certs:/certs
+            - ./custom-templates:/templates
+            - ./blueprints:/blueprints/custom:ro
+
+- name: Start Authentik
+  community.docker.docker_compose_v2:
+    project_src: /opt/authentik
+    files:
+      - compose.yml
+      - compose.override.yml
+    pull: always
+    state: present
+
+- name: Trigger blueprint reconciliation after secret/config change
+  ansible.builtin.file:
+    path: /opt/authentik/blueprints/homelab.yaml
+    state: touch
+    mode: "0644"
+    access_time: preserve
+    modification_time: now
+  when: authentik_env.changed or authentik_blueprint.changed

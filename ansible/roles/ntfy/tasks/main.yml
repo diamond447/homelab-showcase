@@ -1,0 +1,45 @@
+---
+- name: Create ntfy directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ ntfy_dir }}"
+      owner: root
+      mode: "0755"
+    - path: "{{ ntfy_dir }}/cache"
+      owner: "{{ ntfy_uid }}"
+      mode: "0700"
+    - path: "{{ ntfy_dir }}/lib"
+      owner: "{{ ntfy_uid }}"
+      mode: "0700"
+
+# Holds the password hashes and access tokens.
+- name: Deploy ntfy config
+  ansible.builtin.template:
+    src: server.yml.j2
+    dest: "{{ ntfy_dir }}/server.yml"
+    owner: root
+    group: "{{ ntfy_uid }}"
+    mode: "0640"
+  notify: Restart ntfy
+  no_log: true
+
+- name: Deploy ntfy compose
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ ntfy_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart ntfy
+
+- name: Start ntfy
+  community.docker.docker_compose_v2:
+    project_src: "{{ ntfy_dir }}"
+    state: present
+    pull: missing
+    wait: true
